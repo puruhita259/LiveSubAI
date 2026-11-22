@@ -465,8 +465,7 @@ private fun SharePlayerScreen(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "• YouTube, TikTok, Reels, X, Telegram, dan browser mendukung tangkap audio internal secara langsung.
-• Aplikasi ber-DRM (seperti Netflix/Disney+) otomatis mendeteksi blokir dan menawarkan Mode Mikrofon.",
+                        text = "• YouTube, TikTok, Reels, X, Telegram, dan browser mendukung tangkap audio internal secara langsung.\n• Aplikasi ber-DRM (seperti Netflix/Disney+) otomatis mendeteksi blokir dan menawarkan Mode Mikrofon.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
