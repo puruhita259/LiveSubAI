@@ -16,17 +16,21 @@ import java.util.concurrent.TimeUnit
 class GeminiTranslationClient {
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(9, TimeUnit.SECONDS)
+        .writeTimeout(7, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS)
         .build()
 
-    // Menyimpan model yang tidak mendukung field thinkingConfig agar tidak retry berulang
     private val modelsWithoutThinkingConfig = ConcurrentHashMap.newKeySet<String>()
 
     sealed class TranslationResult {
         data class Success(val translatedText: String, val usedModel: String) : TranslationResult()
-        data class Failure(val message: String, val isNetworkError: Boolean = false) : TranslationResult()
+        data class Failure(
+            val message: String,
+            val isNetworkError: Boolean = false,
+            val isTransientQuota: Boolean = false
+        ) : TranslationResult()
     }
 
     suspend fun translateAudioChunk(
@@ -56,6 +60,7 @@ class GeminiTranslationClient {
 
         val candidates = buildModelFallbackChain(model)
         var lastError = "Gagal menerjemahkan."
+        var sawQuota = false
 
         for (candidateModel in candidates) {
             val includeThinkingZero = !modelsWithoutThinkingConfig.contains(candidateModel)
@@ -87,6 +92,7 @@ class GeminiTranslationClient {
                         }
                         is AttemptResult.SwitchModel -> {
                             lastError = retry.message
+                            if (retry.isQuota) sawQuota = true
                         }
                         is AttemptResult.Fatal -> {
                             return@withContext TranslationResult.Failure(retry.message, retry.isNetworkError)
@@ -98,6 +104,7 @@ class GeminiTranslationClient {
                 }
                 is AttemptResult.SwitchModel -> {
                     lastError = attempt.message
+                    if (attempt.isQuota) sawQuota = true
                 }
                 is AttemptResult.Fatal -> {
                     return@withContext TranslationResult.Failure(attempt.message, attempt.isNetworkError)
@@ -105,13 +112,16 @@ class GeminiTranslationClient {
             }
         }
 
-        TranslationResult.Failure(lastError)
+        TranslationResult.Failure(
+            message = lastError,
+            isTransientQuota = sawQuota
+        )
     }
 
     private sealed class AttemptResult {
         data class Ok(val text: String) : AttemptResult()
         data object RetryWithoutThinking : AttemptResult()
-        data class SwitchModel(val message: String) : AttemptResult()
+        data class SwitchModel(val message: String, val isQuota: Boolean = false) : AttemptResult()
         data class Fatal(val message: String, val isNetworkError: Boolean = false) : AttemptResult()
     }
 
@@ -178,19 +188,22 @@ class GeminiTranslationClient {
                     return AttemptResult.RetryWithoutThinking
                 }
 
-                // Auto-fallback saat high demand (503/429) atau model tidak tersedia (404)
-                if (response.code == 503 || response.code == 429 || response.code == 404 ||
+                val isQuotaOrBusy = response.code == 429 || response.code == 503 ||
                     errorMsg.contains("high demand", ignoreCase = true) ||
+                    errorMsg.contains("quota", ignoreCase = true) ||
+                    errorMsg.contains("rate", ignoreCase = true)
+
+                if (isQuotaOrBusy || response.code == 404 ||
                     errorMsg.contains("no longer available", ignoreCase = true)
                 ) {
-                    return AttemptResult.SwitchModel("Gagal menerjemahkan ($errorMsg).")
+                    return AttemptResult.SwitchModel("Gagal menerjemahkan ($errorMsg).", isQuota = isQuotaOrBusy)
                 }
 
                 AttemptResult.Fatal("Gagal menerjemahkan ($errorMsg).")
             }
         } catch (_: IOException) {
             AttemptResult.Fatal(
-                message = "Koneksi terputus. Periksa internet Anda.",
+                message = "Koneksi terputus atau timeout. Mencoba ulang...",
                 isNetworkError = true
             )
         } catch (e: Exception) {

@@ -12,7 +12,10 @@ import android.content.pm.ServiceInfo
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import com.livesub.ai.MainActivity
 import com.livesub.ai.R
@@ -37,6 +40,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 class OverlayTranslationService : Service() {
 
@@ -48,9 +52,14 @@ class OverlayTranslationService : Service() {
     private var overlayController: OverlayViewController? = null
 
     private var mediaProjection: MediaProjection? = null
+    private var projectionCallback: MediaProjection.Callback? = null
     private var captureJob: Job? = null
     private var consumerJob: Job? = null
+    private var watchdogJob: Job? = null
     private var reconnectJob: Job? = null
+
+    private var wsStallCount: Int = 0
+    private var lastRestRequestFinishedAtMs: Long = 0L
 
     private val demoLines = listOf(
         "Pertama, panaskan kaldu dengan api kecil agar aromanya keluar perlahan.",
@@ -69,6 +78,7 @@ class OverlayTranslationService : Service() {
 
         overlayController = OverlayViewController(
             context = this,
+            onFontSizeDelta = { delta -> adjustFontSize(delta) },
             onCycleStyle = { cycleOverlayStyle() },
             onTogglePause = { togglePause() },
             onSwitchToMic = { switchToMicrophoneFallback() },
@@ -119,10 +129,34 @@ class OverlayTranslationService : Service() {
 
                 if (resultCode == Activity.RESULT_OK && resultData != null) {
                     startServiceForeground(CaptureMode.INTERNAL_AUDIO)
+                    releaseMediaProjection()
                     val pm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                    mediaProjection?.stop()
-                    mediaProjection = pm.getMediaProjection(resultCode, resultData)
-                    startTranslationPipeline(CaptureMode.INTERNAL_AUDIO)
+                    val proj = pm.getMediaProjection(resultCode, resultData)
+                    if (proj != null) {
+                        val cb = object : MediaProjection.Callback() {
+                            override fun onStop() {
+                                serviceScope.launch(Dispatchers.Main) {
+                                    if (LiveSubStateHolder.runtime.value.isOverlayActive &&
+                                        LiveSubStateHolder.runtime.value.captureMode == CaptureMode.INTERNAL_AUDIO
+                                    ) {
+                                        LiveSubStateHolder.updateRuntime {
+                                            it.copy(
+                                                status = ServiceStatus.DRM_BLOCKED,
+                                                currentSubtitle = "Izin tangkap layar dihentikan sistem. Aktifkan ulang atau pakai mikrofon."
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        proj.registerCallback(cb, Handler(Looper.getMainLooper()))
+                        projectionCallback = cb
+                        mediaProjection = proj
+                        startTranslationPipeline(CaptureMode.INTERNAL_AUDIO)
+                    } else {
+                        stopSelf()
+                        return START_NOT_STICKY
+                    }
                 } else {
                     stopSelf()
                     return START_NOT_STICKY
@@ -134,8 +168,7 @@ class OverlayTranslationService : Service() {
 
     override fun onDestroy() {
         stopActivePipelines()
-        mediaProjection?.stop()
-        mediaProjection = null
+        releaseMediaProjection()
         overlayController?.dismiss()
         LiveSubStateHolder.updateRuntime {
             it.copy(
@@ -150,7 +183,24 @@ class OverlayTranslationService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private fun releaseMediaProjection() {
+        projectionCallback?.let { cb ->
+            try {
+                mediaProjection?.unregisterCallback(cb)
+            } catch (_: Exception) {
+            }
+        }
+        projectionCallback = null
+        try {
+            mediaProjection?.stop()
+        } catch (_: Exception) {
+        }
+        mediaProjection = null
+    }
+
     private fun stopActivePipelines() {
+        watchdogJob?.cancel()
+        watchdogJob = null
         reconnectJob?.cancel()
         reconnectJob = null
         captureJob?.cancel()
@@ -173,6 +223,7 @@ class OverlayTranslationService : Service() {
             return
         }
 
+        wsStallCount = 0
         if (cfg.translationEngine == TranslationEngine.LIVE_WEBSOCKET) {
             activateOverlay(mode, TranslationEngine.LIVE_WEBSOCKET)
             startLiveWebSocketPipeline(mode)
@@ -196,12 +247,16 @@ class OverlayTranslationService : Service() {
 
         val listener = object : GeminiLiveWebSocketClient.Listener {
             override fun onConnected(modelName: String, isAudioTranscriptionMode: Boolean) {
-                LiveSubStateHolder.updateRuntime {
-                    it.copy(
+                LiveSubStateHolder.updateRuntime { current ->
+                    val keepSubtitle = current.currentSubtitle.isNotBlank() &&
+                        !current.currentSubtitle.startsWith("Menghubungkan") &&
+                        !current.currentSubtitle.startsWith("Menyambungkan") &&
+                        !current.currentSubtitle.startsWith("Audio aplikasi ini dilindungi")
+                    current.copy(
                         activeEngine = TranslationEngine.LIVE_WEBSOCKET,
                         activeModelName = modelName,
                         status = ServiceStatus.LISTENING,
-                        currentSubtitle = "Live WS aktif ($modelName). Putar video bersuara...",
+                        currentSubtitle = if (keepSubtitle) current.currentSubtitle else "Live WS aktif ($modelName). Putar video bersuara...",
                         errorHint = null
                     )
                 }
@@ -209,6 +264,7 @@ class OverlayTranslationService : Service() {
 
             override fun onSubtitleUpdated(subtitle: String) {
                 if (LiveSubStateHolder.runtime.value.isPaused) return
+                wsStallCount = 0
                 LiveSubStateHolder.updateRuntime {
                     it.copy(
                         status = ServiceStatus.LISTENING,
@@ -224,7 +280,7 @@ class OverlayTranslationService : Service() {
                         it.copy(
                             activeEngine = TranslationEngine.FAST_REST,
                             status = ServiceStatus.LISTENING,
-                            currentSubtitle = "$reason (Mode REST Cepat aktif)"
+                            errorHint = reason
                         )
                     }
                     startParallelRestPipeline(mode)
@@ -237,12 +293,9 @@ class OverlayTranslationService : Service() {
                 reconnectJob?.cancel()
                 reconnectJob = serviceScope.launch(Dispatchers.Main) {
                     LiveSubStateHolder.updateRuntime {
-                        it.copy(
-                            status = ServiceStatus.CONNECTING,
-                            currentSubtitle = "Menyambungkan ulang Gemini Live..."
-                        )
+                        it.copy(status = ServiceStatus.RECOVERING)
                     }
-                    delay(1200L)
+                    delay(1000L)
                     if (LiveSubStateHolder.runtime.value.isOverlayActive &&
                         LiveSubStateHolder.runtime.value.activeEngine == TranslationEngine.LIVE_WEBSOCKET
                     ) {
@@ -259,7 +312,7 @@ class OverlayTranslationService : Service() {
             }
         }
 
-        // 1. Jalankan koneksi WebSocket + auto-discovery model Live
+        // 1. Koneksi WebSocket + auto-discovery model Live
         consumerJob = serviceScope.launch {
             geminiLiveClient.startSession(
                 apiKey = cfg.geminiApiKey,
@@ -270,7 +323,49 @@ class OverlayTranslationService : Service() {
             )
         }
 
-        // 2. Jalankan streaming PCM 100ms secara paralel tanpa memblokir
+        // 2. Watchdog anti-macet WS: jika audio bicara aktif tapi 0 respons > 4 dtk -> flush; > 7,5 dtk -> segarkan sesi
+        watchdogJob = serviceScope.launch {
+            var flushedForCurrentStall = false
+            while (isActive) {
+                delay(1500L)
+                val rt = LiveSubStateHolder.runtime.value
+                if (!rt.isOverlayActive || rt.isPaused || rt.activeEngine != TranslationEngine.LIVE_WEBSOCKET) {
+                    flushedForCurrentStall = false
+                    continue
+                }
+                val stallMs = geminiLiveClient.getStallDurationMs()
+                if (stallMs == 0L) {
+                    flushedForCurrentStall = false
+                } else if (stallMs in 3800L..7499L && !flushedForCurrentStall) {
+                    flushedForCurrentStall = true
+                    geminiLiveClient.flushTurn()
+                } else if (stallMs >= 7500L) {
+                    flushedForCurrentStall = false
+                    wsStallCount++
+                    if (wsStallCount >= 2) {
+                        LiveSubStateHolder.updateRuntime {
+                            it.copy(status = ServiceStatus.RECOVERING)
+                        }
+                        startParallelRestPipeline(mode)
+                        break
+                    } else {
+                        LiveSubStateHolder.updateRuntime {
+                            it.copy(status = ServiceStatus.RECOVERING)
+                        }
+                        val latestCfg = LiveSubStateHolder.config.value
+                        geminiLiveClient.startSession(
+                            apiKey = latestCfg.geminiApiKey,
+                            preferredModel = latestCfg.liveModel,
+                            sourceLanguage = latestCfg.sourceLanguage,
+                            targetLanguage = latestCfg.targetLanguage,
+                            listener = listener
+                        )
+                    }
+                }
+            }
+        }
+
+        // 3. Streaming PCM 100ms secara paralel
         captureJob = serviceScope.launch {
             try {
                 if (mode == CaptureMode.INTERNAL_AUDIO) {
@@ -280,28 +375,22 @@ class OverlayTranslationService : Service() {
                         frameDurationMs = 100L,
                         onFrameReady = { frame ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
-                                geminiLiveClient.sendPcmFrame(frame.pcmBytes)
+                                geminiLiveClient.sendPcmFrame(frame.pcmBytes, frame.isSpeech)
                             }
                         },
-                        onDrmSilenceDetected = {
-                            if (!LiveSubStateHolder.runtime.value.isPaused) {
-                                LiveSubStateHolder.updateRuntime {
-                                    it.copy(
-                                        status = ServiceStatus.DRM_BLOCKED,
-                                        currentSubtitle = "Audio aplikasi ini dilindungi DRM atau hening. Ketuk tombol di bawah untuk pakai mikrofon."
-                                    )
-                                }
-                            }
-                        }
+                        onAudioActive = { handleAudioResumed() },
+                        onIdleSilence = { handleIdleSilence() },
+                        onDrmBlockedDetected = { handleDrmBlocked() }
                     )
                 } else {
                     audioCaptureManager.streamMicrophonePcmFrames(
                         frameDurationMs = 100L,
                         onFrameReady = { frame ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
-                                geminiLiveClient.sendPcmFrame(frame.pcmBytes)
+                                geminiLiveClient.sendPcmFrame(frame.pcmBytes, frame.isSpeech)
                             }
-                        }
+                        },
+                        onAudioActive = { handleAudioResumed() }
                     )
                 }
             } catch (e: Exception) {
@@ -319,7 +408,7 @@ class OverlayTranslationService : Service() {
         stopActivePipelines()
 
         val chunkQueue = Channel<AudioCaptureManager.AudioChunk>(
-            capacity = 2,
+            capacity = 1,
             onBufferOverflow = BufferOverflow.DROP_OLDEST
         )
 
@@ -330,47 +419,56 @@ class OverlayTranslationService : Service() {
             )
         }
 
-        // Consumer: kirim chunk ke Gemini REST paralel tanpa menahan AudioRecord
+        // Consumer: proses chunk terbaru dengan timeout ketat (11 dtk) + rate-limit pacing agar tidak macet
         consumerJob = serviceScope.launch(Dispatchers.IO) {
             for (chunk in chunkQueue) {
                 if (!isActive) break
                 if (LiveSubStateHolder.runtime.value.isPaused) continue
-                processRestAudioChunk(chunk.wavBytes)
+
+                val elapsedSinceLast = SystemClock.elapsedRealtime() - lastRestRequestFinishedAtMs
+                if (elapsedSinceLast < MIN_REST_GAP_MS) {
+                    delay(MIN_REST_GAP_MS - elapsedSinceLast)
+                }
+
+                val completed = withTimeoutOrNull(11_000L) {
+                    processRestAudioChunk(chunk.wavBytes)
+                }
+                lastRestRequestFinishedAtMs = SystemClock.elapsedRealtime()
+
+                if (completed == null) {
+                    LiveSubStateHolder.updateRuntime {
+                        it.copy(status = ServiceStatus.RECOVERING)
+                    }
+                }
             }
         }
 
-        // Producer: rekam chunk 1,8 detik (dengan early VAD flush) secara terus-menerus
+        // Producer: rekam chunk 2,4 detik (dengan early VAD flush >= 1,0 detik saat jeda bicara)
         captureJob = serviceScope.launch {
             try {
                 if (mode == CaptureMode.INTERNAL_AUDIO) {
                     val projection = mediaProjection ?: return@launch
                     audioCaptureManager.streamInternalAudio(
                         mediaProjection = projection,
-                        chunkDurationMs = 1800L,
+                        chunkDurationMs = 2400L,
                         onChunkReady = { chunk ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
                                 chunkQueue.trySend(chunk)
                             }
                         },
-                        onDrmSilenceDetected = {
-                            if (!LiveSubStateHolder.runtime.value.isPaused) {
-                                LiveSubStateHolder.updateRuntime {
-                                    it.copy(
-                                        status = ServiceStatus.DRM_BLOCKED,
-                                        currentSubtitle = "Audio aplikasi ini dilindungi DRM atau hening. Ketuk tombol di bawah untuk pakai mikrofon."
-                                    )
-                                }
-                            }
-                        }
+                        onAudioActive = { handleAudioResumed() },
+                        onIdleSilence = { handleIdleSilence() },
+                        onDrmBlockedDetected = { handleDrmBlocked() }
                     )
                 } else {
                     audioCaptureManager.streamMicrophoneAudio(
-                        chunkDurationMs = 1800L,
+                        chunkDurationMs = 2400L,
                         onChunkReady = { chunk ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
                                 chunkQueue.trySend(chunk)
                             }
-                        }
+                        },
+                        onAudioActive = { handleAudioResumed() }
                     )
                 }
             } catch (e: Exception) {
@@ -414,14 +512,57 @@ class OverlayTranslationService : Service() {
                 }
             }
             is GeminiTranslationClient.TranslationResult.Failure -> {
-                LiveSubStateHolder.updateRuntime {
-                    it.copy(
-                        status = if (result.isNetworkError) ServiceStatus.OFFLINE else ServiceStatus.LISTENING,
-                        currentSubtitle = result.message,
-                        errorHint = result.message
-                    )
+                if (result.isTransientQuota) {
+                    // Jangan hapus subtitle terakhir saat 429/503 sementara; beri jeda singkat lalu lanjut
+                    LiveSubStateHolder.updateRuntime {
+                        it.copy(
+                            status = ServiceStatus.RECOVERING,
+                            errorHint = result.message
+                        )
+                    }
+                    delay(2200L)
+                } else {
+                    LiveSubStateHolder.updateRuntime {
+                        it.copy(
+                            status = if (result.isNetworkError) ServiceStatus.OFFLINE else ServiceStatus.LISTENING,
+                            currentSubtitle = result.message,
+                            errorHint = result.message
+                        )
+                    }
                 }
             }
+        }
+    }
+
+    private fun handleAudioResumed() {
+        val rt = LiveSubStateHolder.runtime.value
+        if (rt.isPaused) return
+        if (rt.status == ServiceStatus.DRM_BLOCKED || rt.status == ServiceStatus.WAITING_AUDIO) {
+            LiveSubStateHolder.updateRuntime { current ->
+                val clearDrmText = current.currentSubtitle.startsWith("Audio aplikasi ini dilindungi")
+                current.copy(
+                    status = ServiceStatus.LISTENING,
+                    currentSubtitle = if (clearDrmText) "Suara video terdeteksi. Menerjemahkan..." else current.currentSubtitle
+                )
+            }
+        }
+    }
+
+    private fun handleIdleSilence() {
+        val rt = LiveSubStateHolder.runtime.value
+        if (rt.isPaused || rt.status == ServiceStatus.DRM_BLOCKED) return
+        LiveSubStateHolder.updateRuntime {
+            it.copy(status = ServiceStatus.WAITING_AUDIO)
+        }
+    }
+
+    private fun handleDrmBlocked() {
+        if (LiveSubStateHolder.runtime.value.isPaused) return
+        LiveSubStateHolder.updateRuntime {
+            it.copy(
+                status = ServiceStatus.DRM_BLOCKED,
+                currentSubtitle = "Audio aplikasi ini dilindungi DRM. Ketuk tombol di bawah untuk pakai mikrofon."
+            )
         }
     }
 
@@ -485,6 +626,14 @@ class OverlayTranslationService : Service() {
         }
     }
 
+    private fun adjustFontSize(deltaSp: Float) {
+        val current = LiveSubStateHolder.config.value
+        val nextSize = (current.fontSizeSp + deltaSp).coerceIn(10f, 28f)
+        if (nextSize != current.fontSizeSp) {
+            settingsRepository.save(current.copy(fontSizeSp = nextSize))
+        }
+    }
+
     private fun cycleOverlayStyle() {
         val current = LiveSubStateHolder.config.value
         val styles = SurfaceStyle.entries
@@ -510,8 +659,7 @@ class OverlayTranslationService : Service() {
             return
         }
         stopActivePipelines()
-        mediaProjection?.stop()
-        mediaProjection = null
+        releaseMediaProjection()
         startServiceForeground(CaptureMode.MICROPHONE)
         startTranslationPipeline(CaptureMode.MICROPHONE)
     }
@@ -555,6 +703,7 @@ class OverlayTranslationService : Service() {
     companion object {
         const val CHANNEL_ID = "livesub_overlay_channel"
         const val NOTIFICATION_ID = 1701
+        private const val MIN_REST_GAP_MS = 1800L
 
         const val ACTION_START_MEDIA_PROJECTION = "com.livesub.ai.ACTION_START_MEDIA_PROJECTION"
         const val ACTION_START_MIC = "com.livesub.ai.ACTION_START_MIC"

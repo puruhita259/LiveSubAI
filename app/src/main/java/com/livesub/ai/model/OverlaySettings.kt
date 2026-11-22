@@ -1,9 +1,9 @@
 package com.livesub.ai.model
 
-enum class SurfaceStyle(val label: String, val subtitle: String) {
-    SOLID_DARK("Solid Gelap", "Latar pekat standar, kontras tertinggi"),
-    GLASS_DARK("Glass Hitam", "Kaca gelap blur dengan kilau tepi"),
-    GLASS_CLEAR("Glass Bening", "Kaca bening refraktif, video tetap terlihat")
+enum class SurfaceStyle(val label: String, val shortLabel: String, val subtitle: String) {
+    SOLID_DARK("Solid Gelap", "Solid", "Latar pekat standar, kontras tertinggi"),
+    GLASS_DARK("Glass Hitam", "Glass H", "Kaca gelap blur dengan kilau tepi"),
+    GLASS_CLEAR("Glass Bening", "Glass B", "Kaca bening refraktif, video tetap terlihat")
 }
 
 enum class TextProtection(val label: String, val subtitle: String) {
@@ -13,8 +13,8 @@ enum class TextProtection(val label: String, val subtitle: String) {
 }
 
 enum class TranslationEngine(val label: String, val subtitle: String) {
-    LIVE_WEBSOCKET("Live WebSocket (< 1 dtk)", "Streaming PCM real-time lewat Gemini Live API"),
-    FAST_REST("REST Cepat (Paralel)", "Chunk 1,8 dtk paralel + thinkingBudget 0 + auto-fallback")
+    LIVE_WEBSOCKET("Live WebSocket (< 1 dtk)", "Streaming PCM real-time + anti-macet & auto-flush"),
+    FAST_REST("REST Cepat (Paralel)", "Chunk 2,4 dtk + VAD cepat + anti-timeout & auto-fallback")
 }
 
 enum class CaptureMode(val label: String) {
@@ -26,8 +26,10 @@ enum class CaptureMode(val label: String) {
 enum class ServiceStatus(val label: String) {
     IDLE("Siap dijalankan"),
     CONNECTING("Menghubungkan Gemini Live..."),
+    WAITING_AUDIO("Menunggu suara video..."),
     LISTENING("Live · Mendengarkan..."),
     TRANSLATING("Menerjemahkan..."),
+    RECOVERING("Menyegarkan koneksi..."),
     PAUSED("Terjemahan dijeda"),
     DRM_BLOCKED("Audio aplikasi ini dilindungi DRM"),
     OFFLINE("Koneksi terputus")
@@ -39,7 +41,7 @@ data class OverlayConfig(
     val surfaceStyle: SurfaceStyle = SurfaceStyle.GLASS_DARK,
     val textProtection: TextProtection = TextProtection.HALO_SHADOW,
     val translationEngine: TranslationEngine = TranslationEngine.LIVE_WEBSOCKET,
-    val fontSizeSp: Float = 18f,
+    val fontSizeSp: Float = 15f,
     val blurRadiusPx: Int = 28,
     val tintOpacity: Float = 0.56f,
     val geminiApiKey: String = "",

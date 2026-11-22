@@ -25,6 +25,7 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BlurOn
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.FormatSize
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Link
@@ -103,9 +104,17 @@ private val SUPPORTED_LANGUAGES = listOf(
     "Bahasa Mandarin",
     "Bahasa Arab",
     "Bahasa Thailand",
+    "Bahasa Hindi",
     "Bahasa Spanyol",
     "Bahasa Prancis",
     "Bahasa Jerman"
+)
+
+private val FONT_PRESETS = listOf(
+    "Kecil" to 12f,
+    "Sedang" to 15f,
+    "Besar" to 19f,
+    "Jumbo" to 24f
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -265,7 +274,7 @@ private fun HomeScreen(
                             val modelSuffix = if (runtime.activeModelName.isNotBlank()) " (${runtime.activeModelName})" else ""
                             "Status: ${runtime.status.label}$modelSuffix. Buka YouTube, TikTok, Reels, atau browser."
                         } else {
-                            "Streaming audio real-time lewat Gemini Live WebSocket (< 1 dtk) dengan fallback REST cepat otomatis."
+                            "Streaming audio real-time dengan auto-flush anti-macet dan tombol A-/A+ langsung di overlay."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -383,6 +392,17 @@ private fun HomeScreen(
         item {
             OutlinedCard(shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FontSizeControlSection(
+                        fontSizeSp = config.fontSizeSp,
+                        onFontSizeChange = { onConfigChange(config.copy(fontSizeSp = it)) }
+                    )
+                }
+            }
+        }
+
+        item {
+            OutlinedCard(shape = RoundedCornerShape(16.dp)) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.BlurOn, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
@@ -473,7 +493,7 @@ private fun SharePlayerScreen(
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
-                        text = "• YouTube, TikTok, Reels, X, Telegram, dan browser mendukung tangkap audio internal secara langsung.\n• Aplikasi ber-DRM (seperti Netflix/Disney+) otomatis mendeteksi blokir dan menawarkan Mode Mikrofon.",
+                        text = "• YouTube, TikTok, Reels, X, Telegram, dan browser mendukung tangkap audio internal secara langsung.\n• Aplikasi ber-DRM (seperti Netflix/Disney+) otomatis terdeteksi saat media diputar dan menawarkan Mode Mikrofon.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -540,7 +560,7 @@ private fun AppearanceAndAiScreen(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(140.dp)
+                            .height(150.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(backdropBrush)
                             .padding(14.dp)
@@ -595,6 +615,13 @@ private fun AppearanceAndAiScreen(
         item {
             OutlinedCard(shape = RoundedCornerShape(18.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    FontSizeControlSection(
+                        fontSizeSp = config.fontSizeSp,
+                        onFontSizeChange = { onSaveConfig(config.copy(fontSizeSp = it)) }
+                    )
+
+                    HorizontalDivider()
+
                     Text(
                         text = "Permukaan kotak & pelindung teks",
                         style = MaterialTheme.typography.titleSmall,
@@ -627,13 +654,6 @@ private fun AppearanceAndAiScreen(
                     }
 
                     HorizontalDivider()
-
-                    Text("Ukuran teks: ${config.fontSizeSp.roundToInt()} sp", style = MaterialTheme.typography.labelLarge)
-                    Slider(
-                        value = config.fontSizeSp,
-                        onValueChange = { onSaveConfig(config.copy(fontSizeSp = it)) },
-                        valueRange = 14f..26f
-                    )
 
                     Text("Intensitas blur kaca (Android 12+): ${config.blurRadiusPx} px", style = MaterialTheme.typography.labelLarge)
                     Slider(
@@ -725,6 +745,68 @@ private fun AppearanceAndAiScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun FontSizeControlSection(
+    fontSizeSp: Float,
+    onFontSizeChange: (Float) -> Unit
+) {
+    val currentInt = fontSizeSp.roundToInt()
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.FormatSize, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "Ukuran font subtitle: $currentInt sp",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedButton(
+                    onClick = { onFontSizeChange((fontSizeSp - 1f).coerceIn(10f, 28f)) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Text("A-")
+                }
+                OutlinedButton(
+                    onClick = { onFontSizeChange((fontSizeSp + 1f).coerceIn(10f, 28f)) },
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Text("A+")
+                }
+            }
+        }
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            FONT_PRESETS.forEach { (label, presetSp) ->
+                FilterChip(
+                    selected = currentInt == presetSp.roundToInt(),
+                    onClick = { onFontSizeChange(presetSp) },
+                    label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        Slider(
+            value = fontSizeSp.coerceIn(10f, 28f),
+            onValueChange = { onFontSizeChange(it.roundToInt().toFloat()) },
+            valueRange = 10f..28f
+        )
     }
 }
 

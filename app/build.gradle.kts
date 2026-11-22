@@ -14,8 +14,8 @@ android {
         applicationId = "com.livesub.ai"
         minSdk = 29
         targetSdk = resolvedTargetApi
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 3
+        versionName = "1.2.0"
 
         vectorDrawables {
             useSupportLibrary = true

@@ -57,9 +57,9 @@ class SettingsRepository(context: Context) {
             textProtection = TextProtection.entries.find { it.name == protName } ?: TextProtection.HALO_SHADOW,
             translationEngine = TranslationEngine.entries.find { it.name == engineName }
                 ?: TranslationEngine.LIVE_WEBSOCKET,
-            fontSizeSp = prefs.getFloat(KEY_FONT_SIZE, 18f),
-            blurRadiusPx = prefs.getInt(KEY_BLUR_RADIUS, 28),
-            tintOpacity = prefs.getFloat(KEY_TINT_OPACITY, 0.56f),
+            fontSizeSp = prefs.getFloat(KEY_FONT_SIZE, 15f).coerceIn(10f, 28f),
+            blurRadiusPx = prefs.getInt(KEY_BLUR_RADIUS, 28).coerceIn(0, 60),
+            tintOpacity = prefs.getFloat(KEY_TINT_OPACITY, 0.56f).coerceIn(0.15f, 0.95f),
             geminiApiKey = prefs.getString(KEY_API_KEY, "") ?: "",
             liveModel = prefs.getString(KEY_LIVE_MODEL, "auto")?.ifBlank { "auto" } ?: "auto",
             geminiModel = migratedRestModel
@@ -69,20 +69,25 @@ class SettingsRepository(context: Context) {
     }
 
     fun save(config: OverlayConfig) {
+        val clamped = config.copy(
+            fontSizeSp = config.fontSizeSp.coerceIn(10f, 28f),
+            blurRadiusPx = config.blurRadiusPx.coerceIn(0, 60),
+            tintOpacity = config.tintOpacity.coerceIn(0.15f, 0.95f)
+        )
         prefs.edit()
-            .putString(KEY_SOURCE_LANG, config.sourceLanguage)
-            .putString(KEY_TARGET_LANG, config.targetLanguage)
-            .putString(KEY_SURFACE_STYLE, config.surfaceStyle.name)
-            .putString(KEY_TEXT_PROTECTION, config.textProtection.name)
-            .putString(KEY_ENGINE, config.translationEngine.name)
-            .putFloat(KEY_FONT_SIZE, config.fontSizeSp)
-            .putInt(KEY_BLUR_RADIUS, config.blurRadiusPx)
-            .putFloat(KEY_TINT_OPACITY, config.tintOpacity)
-            .putString(KEY_API_KEY, config.geminiApiKey.trim())
-            .putString(KEY_LIVE_MODEL, config.liveModel.trim().ifEmpty { "auto" })
-            .putString(KEY_MODEL, config.geminiModel.trim().ifEmpty { DEFAULT_REST_MODEL })
+            .putString(KEY_SOURCE_LANG, clamped.sourceLanguage)
+            .putString(KEY_TARGET_LANG, clamped.targetLanguage)
+            .putString(KEY_SURFACE_STYLE, clamped.surfaceStyle.name)
+            .putString(KEY_TEXT_PROTECTION, clamped.textProtection.name)
+            .putString(KEY_ENGINE, clamped.translationEngine.name)
+            .putFloat(KEY_FONT_SIZE, clamped.fontSizeSp)
+            .putInt(KEY_BLUR_RADIUS, clamped.blurRadiusPx)
+            .putFloat(KEY_TINT_OPACITY, clamped.tintOpacity)
+            .putString(KEY_API_KEY, clamped.geminiApiKey.trim())
+            .putString(KEY_LIVE_MODEL, clamped.liveModel.trim().ifEmpty { "auto" })
+            .putString(KEY_MODEL, clamped.geminiModel.trim().ifEmpty { DEFAULT_REST_MODEL })
             .apply()
-        LiveSubStateHolder.updateConfig { config }
+        LiveSubStateHolder.updateConfig { clamped }
     }
 
     companion object {

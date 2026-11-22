@@ -18,11 +18,13 @@ import com.livesub.ai.model.LiveSubRuntimeState
 import com.livesub.ai.model.OverlayConfig
 import com.livesub.ai.model.ServiceStatus
 import com.livesub.ai.model.SurfaceStyle
+import com.livesub.ai.model.TranslationEngine
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class OverlayViewController(
     private val context: Context,
+    private val onFontSizeDelta: (Float) -> Unit,
     private val onCycleStyle: () -> Unit,
     private val onTogglePause: () -> Unit,
     private val onSwitchToMic: () -> Unit,
@@ -35,6 +37,7 @@ class OverlayViewController(
     private var statusLabel: TextView? = null
     private var subtitleText: ReadableSubtitleTextView? = null
     private var fallbackMicButton: TextView? = null
+    private var fontSizeIndicator: TextView? = null
     private var stylePillButton: TextView? = null
     private var pausePillButton: TextView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
@@ -46,7 +49,7 @@ class OverlayViewController(
         }
 
         val dm = context.resources.displayMetrics
-        val cardWidth = (dm.widthPixels * 0.88f).roundToInt().coerceAtMost(dp(440))
+        val cardWidth = (dm.widthPixels * 0.90f).roundToInt().coerceAtMost(dp(440))
 
         val params = WindowManager.LayoutParams(
             cardWidth,
@@ -58,7 +61,7 @@ class OverlayViewController(
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = 0
-            y = (dm.heightPixels * 0.64f).roundToInt()
+            y = (dm.heightPixels * 0.62f).roundToInt()
         }
         layoutParams = params
 
@@ -69,7 +72,7 @@ class OverlayViewController(
 
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(12), dp(16), dp(14))
+            setPadding(dp(14), dp(10), dp(14), dp(12))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -86,8 +89,8 @@ class OverlayViewController(
         }
 
         val statusTv = TextView(context).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setTextColor(Color.argb(230, 147, 197, 253))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextColor(Color.argb(235, 147, 197, 253))
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             setShadowLayer(dp(3).toFloat(), 0f, dp(1).toFloat(), Color.argb(220, 0, 0, 0))
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -106,13 +109,13 @@ class OverlayViewController(
         val subTv = ReadableSubtitleTextView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, config.fontSizeSp)
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
-            setLineSpacing(dp(3).toFloat(), 1.08f)
-            maxLines = 3
+            setLineSpacing(dp(2).toFloat(), 1.08f)
+            maxLines = 4
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(6)
+                topMargin = dp(5)
             }
         }
 
@@ -134,31 +137,58 @@ class OverlayViewController(
         val pillRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setPadding(dp(6), dp(3), dp(6), dp(3))
             background = GradientDrawable().apply {
                 cornerRadius = dp(99).toFloat()
-                setColor(Color.argb(215, 15, 23, 42))
-                setStroke(dp(1), Color.argb(75, 255, 255, 255))
+                setColor(Color.argb(220, 15, 23, 42))
+                setStroke(dp(1), Color.argb(80, 255, 255, 255))
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(8)
+                topMargin = dp(6)
             }
         }
 
-        val styleBtn = createPillButton("Glass Hitam").apply {
+        val fontDownBtn = createPillButton("A-", horizontalPadDp = 9).apply {
+            setOnClickListener { onFontSizeDelta(-1f) }
+        }
+        val fontSizeTv = TextView(context).apply {
+            text = "${config.fontSizeSp.roundToInt()}"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(Color.argb(210, 148, 163, 184))
+            typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(dp(2), dp(6), dp(2), dp(6))
+        }
+        val fontUpBtn = createPillButton("A+", horizontalPadDp = 9).apply {
+            setOnClickListener { onFontSizeDelta(1f) }
+        }
+
+        val divider = View(context).apply {
+            setBackgroundColor(Color.argb(65, 255, 255, 255))
+            layoutParams = LinearLayout.LayoutParams(dp(1), dp(18)).apply {
+                marginStart = dp(2)
+                marginEnd = dp(2)
+            }
+        }
+
+        val styleBtn = createPillButton(config.surfaceStyle.shortLabel, horizontalPadDp = 9).apply {
             setOnClickListener { onCycleStyle() }
         }
-        val pauseBtn = createPillButton("Jeda").apply {
+        val pauseBtn = createPillButton("Jeda", horizontalPadDp = 9).apply {
             setOnClickListener { onTogglePause() }
         }
-        val closeBtn = createPillButton("Tutup").apply {
+        val closeBtn = createPillButton("Tutup", horizontalPadDp = 9).apply {
             setTextColor(Color.rgb(252, 165, 165))
             setOnClickListener { onCloseOverlay() }
         }
 
+        pillRow.addView(fontDownBtn)
+        pillRow.addView(fontSizeTv)
+        pillRow.addView(fontUpBtn)
+        pillRow.addView(divider)
         pillRow.addView(styleBtn)
         pillRow.addView(pauseBtn)
         pillRow.addView(closeBtn)
@@ -173,6 +203,7 @@ class OverlayViewController(
         statusLabel = statusTv
         subtitleText = subTv
         fallbackMicButton = micBtn
+        fontSizeIndicator = fontSizeTv
         stylePillButton = styleBtn
         pausePillButton = pauseBtn
 
@@ -185,7 +216,7 @@ class OverlayViewController(
         val card = subtitleCard ?: return
         val params = layoutParams ?: return
 
-        val engineTag = if (runtime.activeEngine == com.livesub.ai.model.TranslationEngine.LIVE_WEBSOCKET) "WS" else "REST"
+        val engineTag = if (runtime.activeEngine == TranslationEngine.LIVE_WEBSOCKET) "WS" else "REST"
         statusLabel?.text = when (runtime.status) {
             ServiceStatus.DRM_BLOCKED -> "Audio dilindungi DRM"
             ServiceStatus.PAUSED -> "Terjemahan dijeda"
@@ -202,7 +233,8 @@ class OverlayViewController(
         fallbackMicButton?.visibility =
             if (runtime.status == ServiceStatus.DRM_BLOCKED) View.VISIBLE else View.GONE
 
-        stylePillButton?.text = config.surfaceStyle.label
+        fontSizeIndicator?.text = "${config.fontSizeSp.roundToInt()}"
+        stylePillButton?.text = config.surfaceStyle.shortLabel
         pausePillButton?.text = if (runtime.isPaused) "Lanjut" else "Jeda"
 
         applyGlassSurface(card, params, config)
@@ -224,6 +256,7 @@ class OverlayViewController(
         statusLabel = null
         subtitleText = null
         fallbackMicButton = null
+        fontSizeIndicator = null
         stylePillButton = null
         pausePillButton = null
         layoutParams = null
@@ -314,15 +347,15 @@ class OverlayViewController(
         }
     }
 
-    private fun createPillButton(label: String): TextView {
+    private fun createPillButton(label: String, horizontalPadDp: Int = 11): TextView {
         return TextView(context).apply {
             text = label
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(Color.WHITE)
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             gravity = Gravity.CENTER
-            minHeight = dp(40)
-            setPadding(dp(12), dp(8), dp(12), dp(8))
+            minHeight = dp(38)
+            setPadding(dp(horizontalPadDp), dp(7), dp(horizontalPadDp), dp(7))
         }
     }
 
@@ -348,6 +381,7 @@ class OverlayViewController(
             language.contains("Korea", ignoreCase = true) -> "KO"
             language.contains("Arab", ignoreCase = true) -> "AR"
             language.contains("Mandarin", ignoreCase = true) -> "ZH"
+            language.contains("Thailand", ignoreCase = true) -> "TH"
             else -> language.take(2).uppercase()
         }
     }
