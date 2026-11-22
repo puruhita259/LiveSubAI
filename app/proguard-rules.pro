@@ -1,0 +1,3 @@
+-keep class com.livesub.ai.** { *; }
+-dontwarn okhttp3.**
+-dontwarn okio.**
