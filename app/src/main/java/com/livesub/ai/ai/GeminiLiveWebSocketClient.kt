@@ -245,9 +245,7 @@ class GeminiLiveWebSocketClient {
     }
 
     private fun appendAndEmitSubtitle(delta: String) {
-        val cleanedDelta = delta.replace('
-', ' ').replace('
-', ' ')
+        val cleanedDelta = delta.replace('\n', ' ').replace('\r', ' ')
         if (cleanedDelta.isBlank()) return
 
         val display = synchronized(subtitleBuffer) {
@@ -270,7 +268,7 @@ class GeminiLiveWebSocketClient {
                 val startIdx = if (spaceIdx in (cutFrom + 1) until subtitleBuffer.length) spaceIdx + 1 else cutFrom
                 subtitleBuffer.delete(0, startIdx)
             }
-            subtitleBuffer.toString().replace(Regex("\s+"), " ").trim()
+            subtitleBuffer.toString().replace(Regex("\\s+"), " ").trim()
         }
 
         if (display.isNotEmpty()) {
