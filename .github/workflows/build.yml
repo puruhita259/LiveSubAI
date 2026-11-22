@@ -1,0 +1,66 @@
+name: Build LiveSub AI APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      target_api:
+        description: 'Android compileSdk / targetSdk API level'
+        required: false
+        default: '35'
+        type: choice
+        options:
+          - '35'
+          - '36'
+          - '37'
+
+jobs:
+  build-apk:
+    name: Compile Android Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Accept Android SDK Licenses
+        run: |
+          SDK_MANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDK_MANAGER" ]; then
+            SDK_MANAGER="$(command -v sdkmanager || true)"
+          fi
+          if [ -n "$SDK_MANAGER" ]; then
+            yes | "$SDK_MANAGER" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Build Debug APK
+        env:
+          TARGET_API: ${{ github.event.inputs.target_api || '35' }}
+        run: |
+          echo "Building LiveSub AI with targetApi=${TARGET_API}"
+          gradle assembleDebug -PtargetApi="${TARGET_API}" --no-daemon --stacktrace
+
+      - name: Verify APK Output
+        run: |
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload LiveSub AI APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiveSubAI-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
