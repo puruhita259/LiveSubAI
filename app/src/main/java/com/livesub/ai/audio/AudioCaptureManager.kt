@@ -22,6 +22,12 @@ import kotlin.math.sqrt
 
 class AudioCaptureManager(private val context: Context) {
 
+    data class PcmFrame(
+        val pcmBytes: ByteArray,
+        val rmsLevel: Double,
+        val isSpeech: Boolean
+    )
+
     data class AudioChunk(
         val wavBytes: ByteArray,
         val rmsLevel: Double
@@ -34,13 +40,80 @@ class AudioCaptureManager(private val context: Context) {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    /**
+     * Streaming frame PCM mentah 100ms (16kHz, 16-bit, mono) tanpa jeda akumulasi
+     * untuk Gemini Live API WebSocket (< 1 detik latensi).
+     */
+    @SuppressLint("MissingPermission")
+    suspend fun streamInternalPcmFrames(
+        mediaProjection: MediaProjection,
+        frameDurationMs: Long = 100L,
+        onFrameReady: (PcmFrame) -> Unit,
+        onDrmSilenceDetected: () -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val recorder = buildInternalRecorder(mediaProjection)
+        runPcmFrameLoop(
+            recorder = recorder,
+            frameDurationMs = frameDurationMs,
+            detectDrmSilence = true,
+            onFrameReady = onFrameReady,
+            onDrmSilenceDetected = onDrmSilenceDetected
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun streamMicrophonePcmFrames(
+        frameDurationMs: Long = 100L,
+        onFrameReady: (PcmFrame) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val recorder = buildMicRecorder()
+        runPcmFrameLoop(
+            recorder = recorder,
+            frameDurationMs = frameDurationMs,
+            detectDrmSilence = false,
+            onFrameReady = onFrameReady,
+            onDrmSilenceDetected = {}
+        )
+    }
+
+    /**
+     * Streaming potongan WAV cepat (1,8 detik max + early VAD flush saat jeda bicara)
+     * untuk mode REST Cepat Paralel. Callback tidak memblokir perekaman.
+     */
     @SuppressLint("MissingPermission")
     suspend fun streamInternalAudio(
         mediaProjection: MediaProjection,
-        chunkDurationMs: Long = 3200L,
-        onChunkReady: suspend (AudioChunk) -> Unit,
-        onDrmSilenceDetected: suspend () -> Unit
+        chunkDurationMs: Long = 1800L,
+        onChunkReady: (AudioChunk) -> Unit,
+        onDrmSilenceDetected: () -> Unit
     ) = withContext(Dispatchers.IO) {
+        val recorder = buildInternalRecorder(mediaProjection)
+        runVadChunkLoop(
+            recorder = recorder,
+            maxChunkDurationMs = chunkDurationMs,
+            detectDrmSilence = true,
+            onChunkReady = onChunkReady,
+            onDrmSilenceDetected = onDrmSilenceDetected
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    suspend fun streamMicrophoneAudio(
+        chunkDurationMs: Long = 1800L,
+        onChunkReady: (AudioChunk) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val recorder = buildMicRecorder()
+        runVadChunkLoop(
+            recorder = recorder,
+            maxChunkDurationMs = chunkDurationMs,
+            detectDrmSilence = false,
+            onChunkReady = onChunkReady,
+            onDrmSilenceDetected = {}
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun buildInternalRecorder(mediaProjection: MediaProjection): AudioRecord {
         if (!hasRecordAudioPermission()) {
             throw SecurityException("Izin RECORD_AUDIO belum diberikan.")
         }
@@ -63,26 +136,15 @@ class AudioCaptureManager(private val context: Context) {
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(SAMPLE_RATE)
 
-        val recorder = AudioRecord.Builder()
+        return AudioRecord.Builder()
             .setAudioFormat(audioFormat)
             .setBufferSizeInBytes(minBuf * 2)
             .setAudioPlaybackCaptureConfig(captureConfig)
             .build()
-
-        runCaptureLoop(
-            recorder = recorder,
-            chunkDurationMs = chunkDurationMs,
-            detectDrmSilence = true,
-            onChunkReady = onChunkReady,
-            onDrmSilenceDetected = onDrmSilenceDetected
-        )
     }
 
     @SuppressLint("MissingPermission")
-    suspend fun streamMicrophoneAudio(
-        chunkDurationMs: Long = 3200L,
-        onChunkReady: suspend (AudioChunk) -> Unit
-    ) = withContext(Dispatchers.IO) {
+    private fun buildMicRecorder(): AudioRecord {
         if (!hasRecordAudioPermission()) {
             throw SecurityException("Izin RECORD_AUDIO belum diberikan.")
         }
@@ -93,68 +155,128 @@ class AudioCaptureManager(private val context: Context) {
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(SAMPLE_RATE)
 
-        val recorder = AudioRecord(
+        return AudioRecord(
             MediaRecorder.AudioSource.MIC,
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT,
             minBuf * 2
         )
-
-        runCaptureLoop(
-            recorder = recorder,
-            chunkDurationMs = chunkDurationMs,
-            detectDrmSilence = false,
-            onChunkReady = onChunkReady,
-            onDrmSilenceDetected = {}
-        )
     }
 
-    private suspend fun runCaptureLoop(
+    private suspend fun runPcmFrameLoop(
         recorder: AudioRecord,
-        chunkDurationMs: Long,
+        frameDurationMs: Long,
         detectDrmSilence: Boolean,
-        onChunkReady: suspend (AudioChunk) -> Unit,
-        onDrmSilenceDetected: suspend () -> Unit
+        onFrameReady: (PcmFrame) -> Unit,
+        onDrmSilenceDetected: () -> Unit
     ) {
-        val targetBytes = ((SAMPLE_RATE * 2L * chunkDurationMs) / 1000L).toInt()
-        val readBuffer = ByteArray(4096)
-        val pcmAccumulator = ByteArrayOutputStream(targetBytes)
-        var consecutiveSilentChunks = 0
+        val frameBytes = ((SAMPLE_RATE * 2L * frameDurationMs) / 1000L).toInt().coerceAtLeast(1600)
+        val readBuffer = ByteArray(frameBytes)
+        val accumulator = ByteArrayOutputStream(frameBytes)
+        var consecutiveSilentFrames = 0
+        val drmThresholdFrames = (6500L / frameDurationMs.coerceAtLeast(50L)).toInt()
 
         try {
             recorder.startRecording()
             while (currentCoroutineContext().isActive) {
                 val readCount = recorder.read(readBuffer, 0, readBuffer.size)
                 if (readCount > 0) {
-                    pcmAccumulator.write(readBuffer, 0, readCount)
-                    if (pcmAccumulator.size() >= targetBytes) {
-                        val pcm = pcmAccumulator.toByteArray()
-                        pcmAccumulator.reset()
+                    accumulator.write(readBuffer, 0, readCount)
+                    if (accumulator.size() >= frameBytes) {
+                        val pcm = accumulator.toByteArray()
+                        accumulator.reset()
                         val rms = computeRms(pcm)
+                        val isSpeech = rms >= SILENCE_RMS_THRESHOLD
 
-                        if (rms < SILENCE_RMS_THRESHOLD) {
-                            consecutiveSilentChunks++
-                            if (detectDrmSilence && consecutiveSilentChunks >= 3) {
+                        if (!isSpeech) {
+                            consecutiveSilentFrames++
+                            if (detectDrmSilence && consecutiveSilentFrames == drmThresholdFrames) {
                                 onDrmSilenceDetected()
                             }
                         } else {
-                            consecutiveSilentChunks = 0
-                            val wav = wrapPcmAsWav(pcm, SAMPLE_RATE, 1, 16)
-                            onChunkReady(AudioChunk(wavBytes = wav, rmsLevel = rms))
+                            consecutiveSilentFrames = 0
+                        }
+
+                        onFrameReady(PcmFrame(pcmBytes = pcm, rmsLevel = rms, isSpeech = isSpeech))
+                    }
+                }
+            }
+        } finally {
+            safeRelease(recorder)
+        }
+    }
+
+    private suspend fun runVadChunkLoop(
+        recorder: AudioRecord,
+        maxChunkDurationMs: Long,
+        detectDrmSilence: Boolean,
+        onChunkReady: (AudioChunk) -> Unit,
+        onDrmSilenceDetected: () -> Unit
+    ) {
+        val frameBytes = ((SAMPLE_RATE * 2L * 100L) / 1000L).toInt() // 100ms = 3200 bytes
+        val maxChunkBytes = ((SAMPLE_RATE * 2L * maxChunkDurationMs) / 1000L).toInt()
+        val minEarlyFlushBytes = ((SAMPLE_RATE * 2L * 850L) / 1000L).toInt()
+        val readBuffer = ByteArray(frameBytes)
+        val pcmAccumulator = ByteArrayOutputStream(maxChunkBytes)
+
+        var hadSpeechInChunk = false
+        var trailingSilentFrames = 0
+        var consecutiveTotalSilentFrames = 0
+
+        try {
+            recorder.startRecording()
+            while (currentCoroutineContext().isActive) {
+                val readCount = recorder.read(readBuffer, 0, readBuffer.size)
+                if (readCount > 0) {
+                    val slice = if (readCount == readBuffer.size) readBuffer else readBuffer.copyOf(readCount)
+                    val frameRms = computeRms(slice)
+                    val isSpeech = frameRms >= SILENCE_RMS_THRESHOLD
+
+                    if (isSpeech) {
+                        hadSpeechInChunk = true
+                        trailingSilentFrames = 0
+                        consecutiveTotalSilentFrames = 0
+                    } else {
+                        trailingSilentFrames++
+                        consecutiveTotalSilentFrames++
+                        if (detectDrmSilence && consecutiveTotalSilentFrames == 65) {
+                            onDrmSilenceDetected()
+                        }
+                    }
+
+                    if (hadSpeechInChunk) {
+                        pcmAccumulator.write(slice, 0, slice.size)
+                        val reachedMax = pcmAccumulator.size() >= maxChunkBytes
+                        val earlyPauseFlush = pcmAccumulator.size() >= minEarlyFlushBytes && trailingSilentFrames >= 3
+
+                        if (reachedMax || earlyPauseFlush) {
+                            val pcm = pcmAccumulator.toByteArray()
+                            pcmAccumulator.reset()
+                            hadSpeechInChunk = false
+                            trailingSilentFrames = 0
+                            val chunkRms = computeRms(pcm)
+                            if (chunkRms >= SILENCE_RMS_THRESHOLD * 0.7) {
+                                val wav = wrapPcmAsWav(pcm, SAMPLE_RATE, 1, 16)
+                                onChunkReady(AudioChunk(wavBytes = wav, rmsLevel = chunkRms))
+                            }
                         }
                     }
                 }
             }
         } finally {
-            try {
-                if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                    recorder.stop()
-                }
-            } catch (_: IllegalStateException) {
-            }
-            recorder.release()
+            safeRelease(recorder)
         }
+    }
+
+    private fun safeRelease(recorder: AudioRecord) {
+        try {
+            if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                recorder.stop()
+            }
+        } catch (_: IllegalStateException) {
+        }
+        recorder.release()
     }
 
     private fun computeRms(pcm16Bit: ByteArray): Double {

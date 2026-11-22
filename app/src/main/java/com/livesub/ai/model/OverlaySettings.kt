@@ -12,6 +12,11 @@ enum class TextProtection(val label: String, val subtitle: String) {
     MICRO_SCRIM("Scrim Mikro", "Lapisan gelap tipis di belakang teks")
 }
 
+enum class TranslationEngine(val label: String, val subtitle: String) {
+    LIVE_WEBSOCKET("Live WebSocket (< 1 dtk)", "Streaming PCM real-time lewat Gemini Live API"),
+    FAST_REST("REST Cepat (Paralel)", "Chunk 1,8 dtk paralel + thinkingBudget 0 + auto-fallback")
+}
+
 enum class CaptureMode(val label: String) {
     INTERNAL_AUDIO("Audio Video (Internal)"),
     MICROPHONE("Mikrofon (Fallback DRM)"),
@@ -20,8 +25,9 @@ enum class CaptureMode(val label: String) {
 
 enum class ServiceStatus(val label: String) {
     IDLE("Siap dijalankan"),
-    LISTENING("Mendengarkan suara video..."),
-    TRANSLATING("Menerjemahkan dengan AI..."),
+    CONNECTING("Menghubungkan Gemini Live..."),
+    LISTENING("Live · Mendengarkan..."),
+    TRANSLATING("Menerjemahkan..."),
     PAUSED("Terjemahan dijeda"),
     DRM_BLOCKED("Audio aplikasi ini dilindungi DRM"),
     OFFLINE("Koneksi terputus")
@@ -32,17 +38,21 @@ data class OverlayConfig(
     val targetLanguage: String = "Bahasa Indonesia",
     val surfaceStyle: SurfaceStyle = SurfaceStyle.GLASS_DARK,
     val textProtection: TextProtection = TextProtection.HALO_SHADOW,
+    val translationEngine: TranslationEngine = TranslationEngine.LIVE_WEBSOCKET,
     val fontSizeSp: Float = 18f,
     val blurRadiusPx: Int = 28,
     val tintOpacity: Float = 0.56f,
     val geminiApiKey: String = "",
-    val geminiModel: String = "gemini-2.5-flash"
+    val liveModel: String = "auto",
+    val geminiModel: String = "gemini-flash-lite-latest"
 )
 
 data class LiveSubRuntimeState(
     val isOverlayActive: Boolean = false,
     val isPaused: Boolean = false,
     val captureMode: CaptureMode = CaptureMode.INTERNAL_AUDIO,
+    val activeEngine: TranslationEngine = TranslationEngine.LIVE_WEBSOCKET,
+    val activeModelName: String = "",
     val status: ServiceStatus = ServiceStatus.IDLE,
     val currentSubtitle: String = "Siap menerjemahkan suara video secara real-time.",
     val lastDetectedLanguage: String = "Auto",

@@ -1,30 +1,16 @@
-# LiveSub AI — Android 17 (API 37)
+# LiveSub AI v1.1 — Gemini Live API WebSocket (< 1 Detik)
 
-Aplikasi penerjemah subtitle video real-time lintas aplikasi dengan efek **Solid Gelap**, **Glass Hitam**, dan **Glass Bening** + ikon **Themed Adaptive (Material You)**.
+Aplikasi penerjemah subtitle video real-time lintas aplikasi Android dengan **Gemini Live API WebSocket** (`BidiGenerateContent`), efek **Solid Gelap / Glass Hitam / Glass Bening**, dan ikon **Themed Adaptive (Material You)**.
 
-## Cara Build APK di GitHub (Tanpa Android Studio)
+## Pembaruan v1.1 (Ultra-Rendah Latensi)
 
-1. Ekstrak file ZIP ini ke komputer/HP Anda.
-2. Buat repository baru di **GitHub** (Public atau Private).
-3. Unggah seluruh isi folder `LiveSubAI` (pastikan file `.github/workflows/build.yml` ikut terunggah) ke branch `main`:
-   ```bash
-   cd LiveSubAI
-   git init
-   git add .
-   git commit -m "Initial LiveSub AI Android starter"
-   git branch -M main
-   git remote add origin https://github.com/USERNAME/NAMA-REPO.git
-   git push -u origin main
-   ```
-4. Buka tab **Actions** di repository GitHub → tunggu workflow **Build LiveSub AI APK** selesai (~2–3 menit).
-5. Klik run yang sudah hijau → buka bagian **Artifacts** di bawah → unduh **LiveSubAI-debug-apk** → ekstrak dan pasang `app-debug.apk` di HP Android Anda.
+- **Gemini Live API WebSocket (`GeminiLiveWebSocketClient.kt`):** Streaming frame PCM 16kHz per **100 ms** secara real-time tanpa menunggu potongan 3 detik.
+- **Auto-Discovery Model Live (`auto`):** Otomatis memindai model `bidiGenerateContent` aktif di API Key Anda dan otomatis menegosiasikan modality `TEXT` atau `AUDIO + outputAudioTranscription`.
+- **Auto-Fallback ke REST Cepat Paralel:** Jika server Live penuh atau belum aktif di akun, otomatis pindah ke pipeline REST paralel (`Channel` non-blocking, chunk 1,8 detik + early VAD flush, `thinkingBudget: 0`, dan auto-fallback `gemini-flash-lite-latest` → `gemini-flash-latest`).
 
-> **Tips:** Anda juga dapat menjalankan build manual lewat tab **Actions → Build LiveSub AI APK → Run workflow** dan memilih target API (`35`, `36`, atau `37`).
+## Cara Build APK di GitHub
 
-## Fitur Utama
-
-- **Themed Adaptive Icon (Material You):** Dilengkapi layer `<monochrome>` di `mipmap-anydpi-v26` agar ikon otomatis menyesuaikan warna tema launcher Android.
-- **3 Gaya Kotak Subtitle:** Solid Gelap, Glass Hitam (`setBlurBehindRadius`), dan Glass Bening + 3 pelindung teks (Halo Bayangan, Outline Tipis, Scrim Mikro).
-- **AudioPlaybackCapture + Fallback Mikrofon:** Menangkap audio video internal (YouTube, TikTok, Reels, browser) dan otomatis menawarkan tombol **Pakai mikrofon** jika aplikasi ber-DRM memblokir audio.
-- **Gemini AI Siap Pakai:** Masukkan Gemini API Key di tab **Tampilan & AI** di dalam aplikasi (tersimpan lokal di HP, aman tidak masuk ke GitHub).
-- **Adaptive Layout (600dp+):** Mendukung ponsel, split-screen, dan foldable/tablet tanpa mengunci orientasi layar.
+1. Ekstrak ZIP ini, lalu timpa isi repository GitHub Anda dengan isi folder `LiveSubAI/`.
+2. Push ke branch `main` (atau unggah lewat web GitHub).
+3. Buka tab **Actions** → tunggu **Build LiveSub AI APK** selesai → unduh **LiveSubAI-debug-apk** di bagian **Artifacts**.
+4. Instal `app-debug.apk` di HP, masukkan **Gemini API Key** di tab **Tampilan & AI** (biarkan Model Live WebSocket di `auto`), lalu klik **Aktifkan overlay live**.

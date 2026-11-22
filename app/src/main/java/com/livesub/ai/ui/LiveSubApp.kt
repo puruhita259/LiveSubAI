@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BlurOn
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Layers
@@ -85,6 +86,7 @@ import com.livesub.ai.model.LiveSubRuntimeState
 import com.livesub.ai.model.OverlayConfig
 import com.livesub.ai.model.SurfaceStyle
 import com.livesub.ai.model.TextProtection
+import com.livesub.ai.model.TranslationEngine
 import kotlin.math.roundToInt
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
@@ -100,6 +102,7 @@ private val SUPPORTED_LANGUAGES = listOf(
     "Bahasa Korea",
     "Bahasa Mandarin",
     "Bahasa Arab",
+    "Bahasa Thailand",
     "Bahasa Spanyol",
     "Bahasa Prancis",
     "Bahasa Jerman"
@@ -139,7 +142,11 @@ fun LiveSubApp(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = if (runtime.isOverlayActive) "Overlay aktif" else "Terjemahan video real-time",
+                                text = if (runtime.isOverlayActive) {
+                                    "Overlay aktif · ${runtime.activeEngine.label}"
+                                } else {
+                                    "Mode: ${config.translationEngine.label}"
+                                },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -255,9 +262,10 @@ private fun HomeScreen(
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = if (runtime.isOverlayActive) {
-                            "Status: ${runtime.status.label}. Buka YouTube, TikTok, Reels, atau browser untuk melihat subtitle."
+                            val modelSuffix = if (runtime.activeModelName.isNotBlank()) " (${runtime.activeModelName})" else ""
+                            "Status: ${runtime.status.label}$modelSuffix. Buka YouTube, TikTok, Reels, atau browser."
                         } else {
-                            "Tangkap suara video dari aplikasi lain secara langsung. Audio tidak disimpan di perangkat."
+                            "Streaming audio real-time lewat Gemini Live WebSocket (< 1 dtk) dengan fallback REST cepat otomatis."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -481,7 +489,8 @@ private fun AppearanceAndAiScreen(
     onSaveConfig: (OverlayConfig) -> Unit
 ) {
     var apiKeyInput by remember(config.geminiApiKey) { mutableStateOf(config.geminiApiKey) }
-    var modelInput by remember(config.geminiModel) { mutableStateOf(config.geminiModel) }
+    var liveModelInput by remember(config.liveModel) { mutableStateOf(config.liveModel) }
+    var restModelInput by remember(config.geminiModel) { mutableStateOf(config.geminiModel) }
     var previewLightBg by remember { mutableStateOf(false) }
 
     LazyColumn(
@@ -545,7 +554,7 @@ private fun AppearanceAndAiScreen(
                                 .padding(horizontal = 14.dp, vertical = 12.dp)
                         ) {
                             Text(
-                                text = "Mendengarkan suara video...",
+                                text = "Live · Mendengarkan... [WS · ID]",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = Color(0xFF93C5FD),
@@ -647,19 +656,36 @@ private fun AppearanceAndAiScreen(
             OutlinedCard(shape = RoundedCornerShape(18.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Key, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Icon(Icons.Rounded.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            text = "Koneksi Gemini AI",
+                            text = "Mesin terjemahan & koneksi Gemini AI",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold
                         )
                     }
-                    Text(
-                        text = "API Key disimpan lokal di HP Anda saja (tidak pernah diunggah ke GitHub).",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+
+                    TranslationEngine.entries.forEach { engine ->
+                        SelectableOptionRow(
+                            title = engine.label,
+                            subtitle = engine.subtitle,
+                            selected = config.translationEngine == engine,
+                            onClick = { onSaveConfig(config.copy(translationEngine = engine)) }
+                        )
+                    }
+
+                    HorizontalDivider()
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Key, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "API Key disimpan lokal di HP saja (tidak pernah masuk GitHub).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
                     OutlinedTextField(
                         value = apiKeyInput,
                         onValueChange = { apiKeyInput = it },
@@ -669,9 +695,16 @@ private fun AppearanceAndAiScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     OutlinedTextField(
-                        value = modelInput,
-                        onValueChange = { modelInput = it },
-                        label = { Text("Model Gemini") },
+                        value = liveModelInput,
+                        onValueChange = { liveModelInput = it },
+                        label = { Text("Model Live WebSocket (auto = deteksi otomatis)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = restModelInput,
+                        onValueChange = { restModelInput = it },
+                        label = { Text("Model REST Cadangan") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -680,7 +713,8 @@ private fun AppearanceAndAiScreen(
                             onSaveConfig(
                                 config.copy(
                                     geminiApiKey = apiKeyInput.trim(),
-                                    geminiModel = modelInput.trim().ifEmpty { "gemini-2.5-flash" }
+                                    liveModel = liveModelInput.trim().ifEmpty { "auto" },
+                                    geminiModel = restModelInput.trim().ifEmpty { "gemini-flash-lite-latest" }
                                 )
                             )
                         },

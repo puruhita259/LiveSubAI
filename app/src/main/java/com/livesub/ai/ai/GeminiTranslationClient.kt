@@ -10,18 +10,22 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 class GeminiTranslationClient {
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .readTimeout(25, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
         .build()
 
+    // Menyimpan model yang tidak mendukung field thinkingConfig agar tidak retry berulang
+    private val modelsWithoutThinkingConfig = ConcurrentHashMap.newKeySet<String>()
+
     sealed class TranslationResult {
-        data class Success(val translatedText: String) : TranslationResult()
+        data class Success(val translatedText: String, val usedModel: String) : TranslationResult()
         data class Failure(val message: String, val isNetworkError: Boolean = false) : TranslationResult()
     }
 
@@ -40,16 +44,93 @@ class GeminiTranslationClient {
 
         val audioBase64 = Base64.encodeToString(wavBytes, Base64.NO_WRAP)
         val prompt = buildString {
-            append("Dengarkan klip audio video berikut dan terjemahkan ucapannya secara langsung ke dalam ")
+            append("Terjemahkan ucapan di audio ke ")
             append(targetLanguage)
-            append(". ")
             if (sourceLanguage != "Deteksi otomatis") {
-                append("Bahasa sumber diperkirakan ")
+                append(" (dari ")
                 append(sourceLanguage)
-                append(". ")
+                append(")")
             }
-            append("Aturan: balas HANYA teks subtitle hasil terjemahan yang alami dan ringkas (maksimal 2 baris). ")
-            append("Jika hanya musik atau tidak ada ucapan manusia yang jelas, balas kosong.")
+            append(". Balas HANYA teks subtitle ringkas maks 2 baris. Jika tanpa ucapan, balas kosong.")
+        }
+
+        val candidates = buildModelFallbackChain(model)
+        var lastError = "Gagal menerjemahkan."
+
+        for (candidateModel in candidates) {
+            val includeThinkingZero = !modelsWithoutThinkingConfig.contains(candidateModel)
+            when (
+                val attempt = executeSingleRequest(
+                    audioBase64 = audioBase64,
+                    prompt = prompt,
+                    apiKey = apiKey,
+                    modelId = candidateModel,
+                    includeThinkingZero = includeThinkingZero
+                )
+            ) {
+                is AttemptResult.Ok -> {
+                    return@withContext TranslationResult.Success(attempt.text, candidateModel)
+                }
+                is AttemptResult.RetryWithoutThinking -> {
+                    modelsWithoutThinkingConfig.add(candidateModel)
+                    when (
+                        val retry = executeSingleRequest(
+                            audioBase64 = audioBase64,
+                            prompt = prompt,
+                            apiKey = apiKey,
+                            modelId = candidateModel,
+                            includeThinkingZero = false
+                        )
+                    ) {
+                        is AttemptResult.Ok -> {
+                            return@withContext TranslationResult.Success(retry.text, candidateModel)
+                        }
+                        is AttemptResult.SwitchModel -> {
+                            lastError = retry.message
+                        }
+                        is AttemptResult.Fatal -> {
+                            return@withContext TranslationResult.Failure(retry.message, retry.isNetworkError)
+                        }
+                        is AttemptResult.RetryWithoutThinking -> {
+                            lastError = "Model tidak mendukung parameter permintaan."
+                        }
+                    }
+                }
+                is AttemptResult.SwitchModel -> {
+                    lastError = attempt.message
+                }
+                is AttemptResult.Fatal -> {
+                    return@withContext TranslationResult.Failure(attempt.message, attempt.isNetworkError)
+                }
+            }
+        }
+
+        TranslationResult.Failure(lastError)
+    }
+
+    private sealed class AttemptResult {
+        data class Ok(val text: String) : AttemptResult()
+        data object RetryWithoutThinking : AttemptResult()
+        data class SwitchModel(val message: String) : AttemptResult()
+        data class Fatal(val message: String, val isNetworkError: Boolean = false) : AttemptResult()
+    }
+
+    private fun executeSingleRequest(
+        audioBase64: String,
+        prompt: String,
+        apiKey: String,
+        modelId: String,
+        includeThinkingZero: Boolean
+    ): AttemptResult {
+        val generationConfig = JSONObject()
+            .put("temperature", 0.1)
+            .put("maxOutputTokens", 90)
+
+        if (includeThinkingZero) {
+            generationConfig.put(
+                "thinkingConfig",
+                JSONObject().put("thinkingBudget", 0)
+            )
         }
 
         val payload = JSONObject().apply {
@@ -73,45 +154,59 @@ class GeminiTranslationClient {
                     }
                 )
             )
-            put(
-                "generationConfig",
-                JSONObject()
-                    .put("temperature", 0.2)
-                    .put("maxOutputTokens", 120)
-            )
+            put("generationConfig", generationConfig)
         }
 
-        val safeModel = model.trim().ifEmpty { "gemini-2.5-flash" }
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/$safeModel:generateContent?key=$apiKey"
-
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent?key=$apiKey"
         val request = Request.Builder()
             .url(url)
             .post(payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
 
-        try {
+        return try {
             httpClient.newCall(request).execute().use { response ->
                 val bodyText = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    val errorMsg = parseErrorMessage(bodyText) ?: "HTTP ${response.code}"
-                    return@withContext TranslationResult.Failure(
-                        message = "Gagal menerjemahkan ($errorMsg)."
-                    )
+                if (response.isSuccessful) {
+                    return AttemptResult.Ok(parseCandidateText(bodyText))
                 }
 
-                val translated = parseCandidateText(bodyText)
-                TranslationResult.Success(translated)
+                val errorMsg = parseErrorMessage(bodyText) ?: "HTTP ${response.code}"
+                if (includeThinkingZero && response.code == 400 &&
+                    (errorMsg.contains("thinking", ignoreCase = true) ||
+                        errorMsg.contains("Unknown name", ignoreCase = true))
+                ) {
+                    return AttemptResult.RetryWithoutThinking
+                }
+
+                // Auto-fallback saat high demand (503/429) atau model tidak tersedia (404)
+                if (response.code == 503 || response.code == 429 || response.code == 404 ||
+                    errorMsg.contains("high demand", ignoreCase = true) ||
+                    errorMsg.contains("no longer available", ignoreCase = true)
+                ) {
+                    return AttemptResult.SwitchModel("Gagal menerjemahkan ($errorMsg).")
+                }
+
+                AttemptResult.Fatal("Gagal menerjemahkan ($errorMsg).")
             }
-        } catch (ioe: IOException) {
-            TranslationResult.Failure(
+        } catch (_: IOException) {
+            AttemptResult.Fatal(
                 message = "Koneksi terputus. Periksa internet Anda.",
                 isNetworkError = true
             )
         } catch (e: Exception) {
-            TranslationResult.Failure(
-                message = e.localizedMessage ?: "Kesalahan tidak terduga saat menerjemahkan."
-            )
+            AttemptResult.Fatal(e.localizedMessage ?: "Kesalahan tidak terduga saat menerjemahkan.")
         }
+    }
+
+    private fun buildModelFallbackChain(configuredModel: String): List<String> {
+        val list = linkedSetOf<String>()
+        val primary = configuredModel.trim().removePrefix("models/")
+        if (primary.isNotEmpty()) {
+            list.add(primary)
+        }
+        list.add("gemini-flash-lite-latest")
+        list.add("gemini-flash-latest")
+        return list.toList()
     }
 
     private fun parseCandidateText(jsonString: String): String {
@@ -122,7 +217,9 @@ class GeminiTranslationClient {
         val parts = content.optJSONArray("parts") ?: return ""
         val builder = StringBuilder()
         for (i in 0 until parts.length()) {
-            val partText = parts.optJSONObject(i)?.optString("text").orEmpty()
+            val part = parts.optJSONObject(i) ?: continue
+            if (part.optBoolean("thought", false)) continue
+            val partText = part.optString("text").orEmpty()
             if (partText.isNotBlank()) {
                 if (builder.isNotEmpty()) builder.append(" ")
                 builder.append(partText.trim())

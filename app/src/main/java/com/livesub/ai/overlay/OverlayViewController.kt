@@ -185,11 +185,12 @@ class OverlayViewController(
         val card = subtitleCard ?: return
         val params = layoutParams ?: return
 
+        val engineTag = if (runtime.activeEngine == com.livesub.ai.model.TranslationEngine.LIVE_WEBSOCKET) "WS" else "REST"
         statusLabel?.text = when (runtime.status) {
             ServiceStatus.DRM_BLOCKED -> "Audio dilindungi DRM"
             ServiceStatus.PAUSED -> "Terjemahan dijeda"
             ServiceStatus.OFFLINE -> "Koneksi terputus"
-            else -> "${runtime.status.label} (${shortLang(config.targetLanguage)})"
+            else -> "${runtime.status.label} [$engineTag · ${shortLang(config.targetLanguage)}]"
         }
 
         subtitleText?.apply {
