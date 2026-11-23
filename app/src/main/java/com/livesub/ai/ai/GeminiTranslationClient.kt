@@ -55,7 +55,7 @@ class GeminiTranslationClient {
                 append(sourceLanguage)
                 append(")")
             }
-            append(". Balas HANYA teks subtitle ringkas maks 2 baris. Jika tanpa ucapan, balas kosong.")
+            append(". Balas HANYA teks subtitle sangat ringkas maks 12 kata. Jika tanpa ucapan, balas kosong.")
         }
 
         val candidates = buildModelFallbackChain(model)
@@ -134,7 +134,7 @@ class GeminiTranslationClient {
     ): AttemptResult {
         val generationConfig = JSONObject()
             .put("temperature", 0.1)
-            .put("maxOutputTokens", 90)
+            .put("maxOutputTokens", 80)
 
         if (includeThinkingZero) {
             generationConfig.put(
@@ -181,10 +181,9 @@ class GeminiTranslationClient {
                 }
 
                 val errorMsg = parseErrorMessage(bodyText) ?: "HTTP ${response.code}"
-                if (includeThinkingZero && response.code == 400 &&
-                    (errorMsg.contains("thinking", ignoreCase = true) ||
-                        errorMsg.contains("Unknown name", ignoreCase = true))
-                ) {
+
+                // Selalu coba ulang tanpa thinkingConfig pada error 400 (termasuk "Request contains an invalid argument.")
+                if (includeThinkingZero && response.code == 400) {
                     return AttemptResult.RetryWithoutThinking
                 }
 
@@ -193,7 +192,7 @@ class GeminiTranslationClient {
                     errorMsg.contains("quota", ignoreCase = true) ||
                     errorMsg.contains("rate", ignoreCase = true)
 
-                if (isQuotaOrBusy || response.code == 404 ||
+                if (isQuotaOrBusy || response.code == 404 || response.code == 400 ||
                     errorMsg.contains("no longer available", ignoreCase = true)
                 ) {
                     return AttemptResult.SwitchModel("Gagal menerjemahkan ($errorMsg).", isQuota = isQuotaOrBusy)

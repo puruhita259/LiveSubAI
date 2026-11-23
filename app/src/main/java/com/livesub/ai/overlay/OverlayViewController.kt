@@ -7,13 +7,16 @@ import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.text.TextUtils
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.livesub.ai.R
 import com.livesub.ai.model.LiveSubRuntimeState
 import com.livesub.ai.model.OverlayConfig
 import com.livesub.ai.model.ServiceStatus
@@ -37,10 +40,13 @@ class OverlayViewController(
     private var statusLabel: TextView? = null
     private var subtitleText: ReadableSubtitleTextView? = null
     private var fallbackMicButton: TextView? = null
+    private var menuIconButton: ImageView? = null
+    private var controlPillContainer: LinearLayout? = null
     private var fontSizeIndicator: TextView? = null
     private var stylePillButton: TextView? = null
     private var pausePillButton: TextView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
+    private var isMenuExpanded: Boolean = false
 
     fun show(config: OverlayConfig, runtime: LiveSubRuntimeState) {
         if (rootContainer != null) {
@@ -48,6 +54,7 @@ class OverlayViewController(
             return
         }
 
+        isMenuExpanded = false
         val dm = context.resources.displayMetrics
         val cardWidth = (dm.widthPixels * 0.90f).roundToInt().coerceAtMost(dp(440))
 
@@ -72,7 +79,7 @@ class OverlayViewController(
 
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(10), dp(14), dp(12))
+            setPadding(dp(14), dp(8), dp(10), dp(12))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -92,19 +99,37 @@ class OverlayViewController(
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setTextColor(Color.argb(235, 147, 197, 253))
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
             setShadowLayer(dp(3).toFloat(), 0f, dp(1).toFloat(), Color.argb(220, 0, 0, 0))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(8)
+            }
         }
 
-        val dragHintTv = TextView(context).apply {
-            text = "::: Geser"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setTextColor(Color.argb(215, 226, 232, 240))
-            setShadowLayer(dp(3).toFloat(), 0f, dp(1).toFloat(), Color.argb(220, 0, 0, 0))
+        // 2 ikon kompak di pojok kanan atas kotak subtitle: Menu (toggle kontrol) & X (tutup)
+        val menuBtn = createCornerIconButton(
+            drawableRes = R.drawable.ic_overlay_menu,
+            description = "Menu kontrol",
+            active = false
+        ).apply {
+            setOnClickListener { toggleMenuVisibility() }
+        }
+
+        val closeBtn = createCornerIconButton(
+            drawableRes = R.drawable.ic_overlay_close,
+            description = "Tutup overlay",
+            active = false
+        ).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32)).apply {
+                marginStart = dp(6)
+            }
+            setOnClickListener { onCloseOverlay() }
         }
 
         topBar.addView(statusTv)
-        topBar.addView(dragHintTv)
+        topBar.addView(menuBtn)
+        topBar.addView(closeBtn)
 
         val subTv = ReadableSubtitleTextView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, config.fontSizeSp)
@@ -115,7 +140,8 @@ class OverlayViewController(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(5)
+                topMargin = dp(4)
+                marginEnd = dp(4)
             }
         }
 
@@ -134,14 +160,16 @@ class OverlayViewController(
         card.addView(subTv)
         card.addView(micBtn)
 
+        // Panel kontrol tersembunyi secara default, muncul saat ikon Menu di pojok diketuk
         val pillRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(3), dp(6), dp(3))
+            visibility = View.GONE
+            setPadding(dp(8), dp(3), dp(8), dp(3))
             background = GradientDrawable().apply {
                 cornerRadius = dp(99).toFloat()
-                setColor(Color.argb(220, 15, 23, 42))
-                setStroke(dp(1), Color.argb(80, 255, 255, 255))
+                setColor(Color.argb(228, 15, 23, 42))
+                setStroke(dp(1), Color.argb(85, 255, 255, 255))
             }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -151,38 +179,34 @@ class OverlayViewController(
             }
         }
 
-        val fontDownBtn = createPillButton("A-", horizontalPadDp = 9).apply {
+        val fontDownBtn = createPillButton("A-", horizontalPadDp = 10).apply {
             setOnClickListener { onFontSizeDelta(-1f) }
         }
         val fontSizeTv = TextView(context).apply {
             text = "${config.fontSizeSp.roundToInt()}"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            setTextColor(Color.argb(210, 148, 163, 184))
+            setTextColor(Color.argb(215, 148, 163, 184))
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             gravity = Gravity.CENTER
             setPadding(dp(2), dp(6), dp(2), dp(6))
         }
-        val fontUpBtn = createPillButton("A+", horizontalPadDp = 9).apply {
+        val fontUpBtn = createPillButton("A+", horizontalPadDp = 10).apply {
             setOnClickListener { onFontSizeDelta(1f) }
         }
 
         val divider = View(context).apply {
             setBackgroundColor(Color.argb(65, 255, 255, 255))
             layoutParams = LinearLayout.LayoutParams(dp(1), dp(18)).apply {
-                marginStart = dp(2)
-                marginEnd = dp(2)
+                marginStart = dp(4)
+                marginEnd = dp(4)
             }
         }
 
-        val styleBtn = createPillButton(config.surfaceStyle.shortLabel, horizontalPadDp = 9).apply {
+        val styleBtn = createPillButton(config.surfaceStyle.shortLabel, horizontalPadDp = 10).apply {
             setOnClickListener { onCycleStyle() }
         }
-        val pauseBtn = createPillButton("Jeda", horizontalPadDp = 9).apply {
+        val pauseBtn = createPillButton("Jeda", horizontalPadDp = 10).apply {
             setOnClickListener { onTogglePause() }
-        }
-        val closeBtn = createPillButton("Tutup", horizontalPadDp = 9).apply {
-            setTextColor(Color.rgb(252, 165, 165))
-            setOnClickListener { onCloseOverlay() }
         }
 
         pillRow.addView(fontDownBtn)
@@ -191,7 +215,6 @@ class OverlayViewController(
         pillRow.addView(divider)
         pillRow.addView(styleBtn)
         pillRow.addView(pauseBtn)
-        pillRow.addView(closeBtn)
 
         attachDragListener(card)
 
@@ -203,6 +226,8 @@ class OverlayViewController(
         statusLabel = statusTv
         subtitleText = subTv
         fallbackMicButton = micBtn
+        menuIconButton = menuBtn
+        controlPillContainer = pillRow
         fontSizeIndicator = fontSizeTv
         stylePillButton = styleBtn
         pausePillButton = pauseBtn
@@ -233,6 +258,9 @@ class OverlayViewController(
         fallbackMicButton?.visibility =
             if (runtime.status == ServiceStatus.DRM_BLOCKED) View.VISIBLE else View.GONE
 
+        controlPillContainer?.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+        menuIconButton?.background = createCornerIconBackground(active = isMenuExpanded)
+
         fontSizeIndicator?.text = "${config.fontSizeSp.roundToInt()}"
         stylePillButton?.text = config.surfaceStyle.shortLabel
         pausePillButton?.text = if (runtime.isPaused) "Lanjut" else "Jeda"
@@ -256,10 +284,25 @@ class OverlayViewController(
         statusLabel = null
         subtitleText = null
         fallbackMicButton = null
+        menuIconButton = null
+        controlPillContainer = null
         fontSizeIndicator = null
         stylePillButton = null
         pausePillButton = null
         layoutParams = null
+        isMenuExpanded = false
+    }
+
+    private fun toggleMenuVisibility() {
+        isMenuExpanded = !isMenuExpanded
+        controlPillContainer?.visibility = if (isMenuExpanded) View.VISIBLE else View.GONE
+        menuIconButton?.background = createCornerIconBackground(active = isMenuExpanded)
+        val root = rootContainer ?: return
+        val params = layoutParams ?: return
+        try {
+            windowManager.updateViewLayout(root, params)
+        } catch (_: IllegalArgumentException) {
+        }
     }
 
     private fun applyGlassSurface(
@@ -343,6 +386,34 @@ class OverlayViewController(
                     true
                 }
                 else -> false
+            }
+        }
+    }
+
+    private fun createCornerIconButton(
+        drawableRes: Int,
+        description: String,
+        active: Boolean
+    ): ImageView {
+        return ImageView(context).apply {
+            setImageResource(drawableRes)
+            contentDescription = description
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(7), dp(7), dp(7), dp(7))
+            background = createCornerIconBackground(active)
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
+        }
+    }
+
+    private fun createCornerIconBackground(active: Boolean): GradientDrawable {
+        return GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            if (active) {
+                setColor(Color.argb(175, 59, 130, 246))
+                setStroke(dp(1), Color.argb(150, 255, 255, 255))
+            } else {
+                setColor(Color.argb(120, 15, 23, 42))
+                setStroke(dp(1), Color.argb(70, 255, 255, 255))
             }
         }
     }

@@ -336,10 +336,10 @@ class OverlayTranslationService : Service() {
                 val stallMs = geminiLiveClient.getStallDurationMs()
                 if (stallMs == 0L) {
                     flushedForCurrentStall = false
-                } else if (stallMs in 3800L..7499L && !flushedForCurrentStall) {
+                } else if (stallMs in 3200L..6499L && !flushedForCurrentStall) {
                     flushedForCurrentStall = true
                     geminiLiveClient.flushTurn()
-                } else if (stallMs >= 7500L) {
+                } else if (stallMs >= 6500L) {
                     flushedForCurrentStall = false
                     wsStallCount++
                     if (wsStallCount >= 2) {
@@ -372,7 +372,7 @@ class OverlayTranslationService : Service() {
                     val projection = mediaProjection ?: return@launch
                     audioCaptureManager.streamInternalPcmFrames(
                         mediaProjection = projection,
-                        frameDurationMs = 100L,
+                        frameDurationMs = 50L,
                         onFrameReady = { frame ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
                                 geminiLiveClient.sendPcmFrame(frame.pcmBytes, frame.isSpeech)
@@ -384,7 +384,7 @@ class OverlayTranslationService : Service() {
                     )
                 } else {
                     audioCaptureManager.streamMicrophonePcmFrames(
-                        frameDurationMs = 100L,
+                        frameDurationMs = 50L,
                         onFrameReady = { frame ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
                                 geminiLiveClient.sendPcmFrame(frame.pcmBytes, frame.isSpeech)
@@ -450,7 +450,7 @@ class OverlayTranslationService : Service() {
                     val projection = mediaProjection ?: return@launch
                     audioCaptureManager.streamInternalAudio(
                         mediaProjection = projection,
-                        chunkDurationMs = 2400L,
+                        chunkDurationMs = 1600L,
                         onChunkReady = { chunk ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
                                 chunkQueue.trySend(chunk)
@@ -462,7 +462,7 @@ class OverlayTranslationService : Service() {
                     )
                 } else {
                     audioCaptureManager.streamMicrophoneAudio(
-                        chunkDurationMs = 2400L,
+                        chunkDurationMs = 1600L,
                         onChunkReady = { chunk ->
                             if (!LiveSubStateHolder.runtime.value.isPaused) {
                                 chunkQueue.trySend(chunk)
@@ -703,7 +703,7 @@ class OverlayTranslationService : Service() {
     companion object {
         const val CHANNEL_ID = "livesub_overlay_channel"
         const val NOTIFICATION_ID = 1701
-        private const val MIN_REST_GAP_MS = 1800L
+        private const val MIN_REST_GAP_MS = 650L
 
         const val ACTION_START_MEDIA_PROJECTION = "com.livesub.ai.ACTION_START_MEDIA_PROJECTION"
         const val ACTION_START_MIC = "com.livesub.ai.ACTION_START_MIC"

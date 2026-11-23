@@ -12,14 +12,17 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 
 /**
- * Klien WebSocket real-time untuk Gemini Live API (BidiGenerateContent).
- * Dilengkapi anti-macet untuk narasi video cepat tanpa jeda:
- * - NO_INTERRUPTION agar ucapan baru tidak membatalkan terjemahan yang sedang berjalan.
- * - Auto-flush (`audioStreamEnd: true`) saat narasi terus menerus > 2,5 detik.
- * - Fallback otomatis ke setup standar jika model tertentu menolak realtimeInputConfig.
+ * Klien WebSocket ultra-rendah latensi untuk Gemini Live API (BidiGenerateContent).
+ * Optimasi anti-telat & anti-drift:
+ * 1) thinkingBudget = 0 (dengan fallback otomatis jika model menolak) untuk memangkas latensi token pertama.
+ * 2) Flush awal super cepat (~1,0 detik) agar subtitle pertama langsung muncul.
+ * 3) Zero-Drift Turn Gating + Rolling Ring Buffer 1,2 detik: tidak pernah menumpuk antrean turn di server
+ *    saat pembicara video berbicara cepat nonstop.
  */
 class GeminiLiveWebSocketClient {
 
@@ -31,14 +34,14 @@ class GeminiLiveWebSocketClient {
     }
 
     private val wsClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .pingInterval(15, TimeUnit.SECONDS)
         .build()
 
     private val discoveryClient: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(8, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(6, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
     @Volatile
@@ -54,16 +57,21 @@ class GeminiLiveWebSocketClient {
     private var useLegacyMediaChunks: Boolean = false
 
     @Volatile
+    private var useThinkingZeroInSetup: Boolean = true
+
+    @Volatile
     private var useEnhancedRealtimeConfig: Boolean = true
 
     @Volatile
-    private var lastServerOutputElapsedMs: Long = 0L
-
-    @Volatile
-    private var continuousSpeechFrames: Int = 0
-
-    @Volatile
     private var pendingSpeechSinceLastOutputMs: Long = 0L
+
+    private val flowLock = Any()
+    private var awaitingTurnResponse: Boolean = false
+    private var turnFlushedAtMs: Long = 0L
+    private var hasProducedFirstSubtitle: Boolean = false
+    private var speechFramesInCurrentTurn: Int = 0
+    private var trailingSilenceFrames: Int = 0
+    private val pendingRingBuffer = ArrayDeque<ByteArray>()
 
     private val subtitleBuffer = StringBuilder()
     private var resetBufferOnNextToken: Boolean = false
@@ -119,6 +127,7 @@ class GeminiLiveWebSocketClient {
         candidateIndex = 0
         triedAlternateModalityForCurrent = false
         useLegacyMediaChunks = false
+        useThinkingZeroInSetup = true
         useEnhancedRealtimeConfig = true
 
         if (candidateModels.isEmpty()) {
@@ -131,76 +140,109 @@ class GeminiLiveWebSocketClient {
         openSocketForCurrentCandidate()
     }
 
+    /**
+     * Menerima frame PCM 50ms secara real-time.
+     * - Jika server siap: kirim live langsung dan flush cepat (1,0 dtk untuk subtitle pertama, 1,4 dtk selanjutnya).
+     * - Jika server masih memproses turn sebelumnya: tahan di rolling ring buffer max 1,2 detik agar tidak
+     *   pernah terjadi antrean menumpuk (0 drift).
+     */
     fun sendPcmFrame(pcm16kMonoBytes: ByteArray, isSpeech: Boolean): Boolean {
         val socket = activeSocket ?: return false
         if (!isSetupComplete || isClosedByUser) return false
         if (socket.queueSize() > MAX_QUEUE_BYTES) return false
 
         val now = SystemClock.elapsedRealtime()
-        if (isSpeech) {
-            continuousSpeechFrames++
-            if (pendingSpeechSinceLastOutputMs == 0L) {
+        var shouldSendLiveNow = false
+        var shouldFlushNow = false
+        var drainedPayload: ByteArray? = null
+
+        synchronized(flowLock) {
+            if (isSpeech && pendingSpeechSinceLastOutputMs == 0L) {
                 pendingSpeechSinceLastOutputMs = now
             }
-        } else {
-            if (continuousSpeechFrames >= 8) {
-                // Jeda alami setelah bicara >= 0,8 detik -> bantu akhiri turn segera
-                flushTurn()
+
+            // Katup pengaman: jika turnComplete terlalu lama (> 3,2 dtk), buka kunci otomatis
+            if (awaitingTurnResponse && (now - turnFlushedAtMs) >= TURN_LOCK_TIMEOUT_MS) {
+                awaitingTurnResponse = false
+                drainedPayload = drainRingBufferLocked()
             }
-            continuousSpeechFrames = 0
+
+            if (awaitingTurnResponse) {
+                // Simpan hanya audio terbaru (maksimal 1,2 detik terakhir) sambil menunggu turn selesai
+                if (isSpeech || pendingRingBuffer.isNotEmpty()) {
+                    pendingRingBuffer.addLast(pcm16kMonoBytes)
+                    while (pendingRingBuffer.size > MAX_RING_FRAMES) {
+                        pendingRingBuffer.removeFirst()
+                    }
+                }
+                return true
+            }
+
+            shouldSendLiveNow = true
+            if (isSpeech) {
+                speechFramesInCurrentTurn++
+                trailingSilenceFrames = 0
+            } else if (speechFramesInCurrentTurn > 0) {
+                trailingSilenceFrames++
+            }
+
+            val maxSpeechFrames = if (hasProducedFirstSubtitle) {
+                STEADY_SPEECH_FLUSH_FRAMES
+            } else {
+                FIRST_SPEECH_FLUSH_FRAMES
+            }
+
+            val hitNaturalPause = speechFramesInCurrentTurn >= MIN_PAUSE_FLUSH_FRAMES &&
+                trailingSilenceFrames >= PAUSE_SILENCE_FRAMES
+            val hitMaxBurst = speechFramesInCurrentTurn >= maxSpeechFrames
+
+            if (hitNaturalPause || hitMaxBurst) {
+                shouldFlushNow = true
+                awaitingTurnResponse = true
+                turnFlushedAtMs = now
+                speechFramesInCurrentTurn = 0
+                trailingSilenceFrames = 0
+            }
         }
 
-        val base64Pcm = Base64.encodeToString(pcm16kMonoBytes, Base64.NO_WRAP)
-        val blob = JSONObject()
-            .put("mimeType", "audio/pcm;rate=16000")
-            .put("data", base64Pcm)
-
-        val realtimeInput = JSONObject()
-        if (useLegacyMediaChunks) {
-            realtimeInput.put("mediaChunks", JSONArray().put(blob))
-        } else {
-            realtimeInput.put("audio", blob)
+        if (drainedPayload != null && drainedPayload!!.isNotEmpty()) {
+            sendRawPcmBlob(socket, drainedPayload!!)
         }
 
-        val sent = socket.send(JSONObject().put("realtimeInput", realtimeInput).toString())
-
-        // Anti-macet narasi nonstop: paksa akhiri turn setiap ~2,5 detik bicara tanpa jeda
-        if (sent && continuousSpeechFrames >= CONTINUOUS_SPEECH_FLUSH_FRAMES) {
-            continuousSpeechFrames = 0
-            flushTurn()
+        var sent = true
+        if (shouldSendLiveNow) {
+            sent = sendRawPcmBlob(socket, pcm16kMonoBytes)
         }
-
+        if (sent && shouldFlushNow) {
+            sendStreamEndSignal(socket)
+        }
         return sent
     }
 
     fun flushTurn() {
         val socket = activeSocket ?: return
         if (!isSetupComplete || isClosedByUser) return
-        if (!useLegacyMediaChunks) {
-            val endPayload = JSONObject().put(
-                "realtimeInput",
-                JSONObject().put("audioStreamEnd", true)
-            )
-            socket.send(endPayload.toString())
-        } else {
-            // Mode legacy: kirim 300ms PCM hening agar server VAD mendeteksi akhir kalimat
-            val silentBase64 = Base64.encodeToString(SILENT_300MS_PCM, Base64.NO_WRAP)
-            val blob = JSONObject()
-                .put("mimeType", "audio/pcm;rate=16000")
-                .put("data", silentBase64)
-            val payload = JSONObject().put(
-                "realtimeInput",
-                JSONObject().put("mediaChunks", JSONArray().put(blob))
-            )
-            socket.send(payload.toString())
+        synchronized(flowLock) {
+            awaitingTurnResponse = true
+            turnFlushedAtMs = SystemClock.elapsedRealtime()
+            speechFramesInCurrentTurn = 0
+            trailingSilenceFrames = 0
         }
+        sendStreamEndSignal(socket)
     }
 
     fun stopSession() {
         isClosedByUser = true
         isSetupComplete = false
-        continuousSpeechFrames = 0
         pendingSpeechSinceLastOutputMs = 0L
+        synchronized(flowLock) {
+            awaitingTurnResponse = false
+            turnFlushedAtMs = 0L
+            hasProducedFirstSubtitle = false
+            speechFramesInCurrentTurn = 0
+            trailingSilenceFrames = 0
+            pendingRingBuffer.clear()
+        }
         synchronized(subtitleBuffer) {
             subtitleBuffer.clear()
             resetBufferOnNextToken = false
@@ -212,6 +254,43 @@ class GeminiLiveWebSocketClient {
         activeSocket = null
     }
 
+    private fun sendRawPcmBlob(socket: WebSocket, pcmBytes: ByteArray): Boolean {
+        val base64Pcm = Base64.encodeToString(pcmBytes, Base64.NO_WRAP)
+        val blob = JSONObject()
+            .put("mimeType", "audio/pcm;rate=16000")
+            .put("data", base64Pcm)
+
+        val realtimeInput = JSONObject()
+        if (useLegacyMediaChunks) {
+            realtimeInput.put("mediaChunks", JSONArray().put(blob))
+        } else {
+            realtimeInput.put("audio", blob)
+        }
+
+        return socket.send(JSONObject().put("realtimeInput", realtimeInput).toString())
+    }
+
+    private fun sendStreamEndSignal(socket: WebSocket) {
+        if (!useLegacyMediaChunks) {
+            val endPayload = JSONObject().put(
+                "realtimeInput",
+                JSONObject().put("audioStreamEnd", true)
+            )
+            socket.send(endPayload.toString())
+        } else {
+            sendRawPcmBlob(socket, SILENT_250MS_PCM)
+        }
+    }
+
+    private fun drainRingBufferLocked(): ByteArray? {
+        if (pendingRingBuffer.isEmpty()) return null
+        val out = ByteArrayOutputStream(pendingRingBuffer.size * 1600)
+        while (pendingRingBuffer.isNotEmpty()) {
+            out.write(pendingRingBuffer.removeFirst())
+        }
+        return out.toByteArray()
+    }
+
     private fun openSocketForCurrentCandidate() {
         if (isClosedByUser) return
         if (candidateIndex >= candidateModels.size) {
@@ -221,8 +300,15 @@ class GeminiLiveWebSocketClient {
 
         val modelId = candidateModels[candidateIndex]
         isSetupComplete = false
-        continuousSpeechFrames = 0
         pendingSpeechSinceLastOutputMs = 0L
+        synchronized(flowLock) {
+            awaitingTurnResponse = false
+            turnFlushedAtMs = 0L
+            hasProducedFirstSubtitle = false
+            speechFramesInCurrentTurn = 0
+            trailingSilenceFrames = 0
+            pendingRingBuffer.clear()
+        }
         synchronized(subtitleBuffer) {
             subtitleBuffer.clear()
             resetBufferOnNextToken = false
@@ -240,6 +326,7 @@ class GeminiLiveWebSocketClient {
                 val setupJson = buildSetupPayload(
                     modelId = modelId,
                     useAudioModality = currentUseAudioModality,
+                    includeThinkingZero = useThinkingZeroInSetup,
                     includeRealtimeConfig = useEnhancedRealtimeConfig,
                     sourceLang = currentSourceLang,
                     targetLang = currentTargetLang
@@ -278,7 +365,6 @@ class GeminiLiveWebSocketClient {
 
             if (root.has("setupComplete")) {
                 isSetupComplete = true
-                lastServerOutputElapsedMs = SystemClock.elapsedRealtime()
                 pendingSpeechSinceLastOutputMs = 0L
                 currentListener?.onConnected(modelId, currentUseAudioModality)
                 return
@@ -292,7 +378,7 @@ class GeminiLiveWebSocketClient {
 
             var emittedAnyText = false
 
-            // 1. Cek outputTranscription (untuk model native-audio)
+            // 1. outputTranscription (model native-audio)
             val outputTranscription = serverContent.optJSONObject("outputTranscription")
             val transcriptText = outputTranscription?.optString("text").orEmpty()
             if (transcriptText.isNotEmpty()) {
@@ -300,7 +386,7 @@ class GeminiLiveWebSocketClient {
                 emittedAnyText = true
             }
 
-            // 2. Cek modelTurn.parts[].text (untuk model responseModalities = TEXT)
+            // 2. modelTurn.parts[].text (model TEXT)
             val modelTurn = serverContent.optJSONObject("modelTurn")
             val parts = modelTurn?.optJSONArray("parts")
             if (parts != null) {
@@ -316,8 +402,10 @@ class GeminiLiveWebSocketClient {
             }
 
             if (emittedAnyText) {
-                lastServerOutputElapsedMs = SystemClock.elapsedRealtime()
                 pendingSpeechSinceLastOutputMs = 0L
+                synchronized(flowLock) {
+                    hasProducedFirstSubtitle = true
+                }
             }
 
             if (serverContent.optBoolean("turnComplete", false)) {
@@ -325,8 +413,49 @@ class GeminiLiveWebSocketClient {
                 if (!emittedAnyText) {
                     pendingSpeechSinceLastOutputMs = 0L
                 }
+                dispatchFreshestBufferedAudioAfterTurn()
             }
         } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Begitu server selesai 1 turn (turnComplete), langsung kirim audio paling segar
+     * (maksimal 1,2 detik terakhir) dari ring buffer agar subtitle selalu sinkron real-time.
+     */
+    private fun dispatchFreshestBufferedAudioAfterTurn() {
+        val socket = activeSocket ?: return
+        if (!isSetupComplete || isClosedByUser) return
+
+        var freshAudio: ByteArray? = null
+        var flushImmediately = false
+
+        synchronized(flowLock) {
+            val bufferedFrameCount = pendingRingBuffer.size
+            if (bufferedFrameCount > 0) {
+                freshAudio = drainRingBufferLocked()
+                if (bufferedFrameCount >= MIN_IMMEDIATE_DRAIN_FRAMES) {
+                    flushImmediately = true
+                    awaitingTurnResponse = true
+                    turnFlushedAtMs = SystemClock.elapsedRealtime()
+                    speechFramesInCurrentTurn = 0
+                    trailingSilenceFrames = 0
+                } else {
+                    awaitingTurnResponse = false
+                    speechFramesInCurrentTurn = bufferedFrameCount
+                    trailingSilenceFrames = 0
+                }
+            } else {
+                awaitingTurnResponse = false
+            }
+        }
+
+        val bytesToSend = freshAudio
+        if (bytesToSend != null && bytesToSend.isNotEmpty()) {
+            val ok = sendRawPcmBlob(socket, bytesToSend)
+            if (ok && flushImmediately) {
+                sendStreamEndSignal(socket)
+            }
         }
     }
 
@@ -366,14 +495,21 @@ class GeminiLiveWebSocketClient {
         activeSocket = null
 
         if (!isSetupComplete) {
-            // Jika ditolak karena realtimeInputConfig, coba ulang model yg sama tanpa realtimeInputConfig
+            // 1. Jika ditolak saat setup, coba lepas thinkingConfig dulu
+            if (useThinkingZeroInSetup && code == 1007) {
+                useThinkingZeroInSetup = false
+                openSocketForCurrentCandidate()
+                return
+            }
+
+            // 2. Jika masih ditolak, lepas realtimeInputConfig
             if (useEnhancedRealtimeConfig && code == 1007) {
                 useEnhancedRealtimeConfig = false
                 openSocketForCurrentCandidate()
                 return
             }
 
-            // Jika masih ditolak di setup, coba balik modality TEXT <-> AUDIO
+            // 3. Jika masih ditolak, coba balik modality AUDIO <-> TEXT
             if (!triedAlternateModalityForCurrent && (code == 1007 || code == 1008 || code == 1003)) {
                 triedAlternateModalityForCurrent = true
                 currentUseAudioModality = !currentUseAudioModality
@@ -383,6 +519,7 @@ class GeminiLiveWebSocketClient {
 
             candidateIndex++
             triedAlternateModalityForCurrent = false
+            useThinkingZeroInSetup = true
             useEnhancedRealtimeConfig = true
             if (candidateIndex < candidateModels.size) {
                 currentUseAudioModality = isNativeAudioModel(candidateModels[candidateIndex])
@@ -396,7 +533,6 @@ class GeminiLiveWebSocketClient {
             return
         }
 
-        // Jika sudah setupComplete lalu server menolak `audio` / `audioStreamEnd`, beralih ke `mediaChunks`
         if (code == 1007 && !useLegacyMediaChunks &&
             (reason.contains("audio", ignoreCase = true) || reason.contains("StreamEnd", ignoreCase = true))
         ) {
@@ -416,28 +552,31 @@ class GeminiLiveWebSocketClient {
     private fun buildSetupPayload(
         modelId: String,
         useAudioModality: Boolean,
+        includeThinkingZero: Boolean,
         includeRealtimeConfig: Boolean,
         sourceLang: String,
         targetLang: String
     ): String {
         val fullModel = if (modelId.startsWith("models/")) modelId else "models/$modelId"
         val instruction = buildString {
-            append("Kamu adalah penerjemah subtitle video real-time. ")
-            append("Terjemahkan setiap ucapan dari audio secara langsung, akurat, dan ringkas ke dalam ")
+            append("Kamu penerjemah subtitle real-time ultra-cepat. ")
+            append("Terjemahkan ucapan audio ke ")
             append(targetLang)
-            append(". ")
             if (sourceLang != "Deteksi otomatis") {
-                append("Bahasa sumber adalah ")
+                append(" dari ")
                 append(sourceLang)
-                append(". ")
             }
-            append("Jangan mengobrol, jangan menjawab pembicara, jangan tambahkan catatan. ")
-            append("Keluarkan HANYA teks terjemahan alami.")
+            append(". Aturan wajib: sangat singkat dan padat (maks 10 kata), langsung inti ucapan, ")
+            append("tanpa pembuka, tanpa penjelasan, jangan menjawab pembicara.")
         }
 
         val generationConfig = JSONObject()
             .put("responseModalities", JSONArray().put(if (useAudioModality) "AUDIO" else "TEXT"))
-            .put("temperature", 0.2)
+            .put("temperature", 0.1)
+
+        if (includeThinkingZero) {
+            generationConfig.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+        }
 
         val setup = JSONObject()
             .put("model", fullModel)
@@ -458,7 +597,7 @@ class GeminiLiveWebSocketClient {
             val vadConfig = JSONObject()
                 .put("startOfSpeechSensitivity", "START_SENSITIVITY_HIGH")
                 .put("endOfSpeechSensitivity", "END_SENSITIVITY_HIGH")
-                .put("silenceDurationMs", 250)
+                .put("silenceDurationMs", 200)
             val realtimeCfg = JSONObject()
                 .put("automaticActivityDetection", vadConfig)
                 .put("activityHandling", "NO_INTERRUPTION")
@@ -519,10 +658,19 @@ class GeminiLiveWebSocketClient {
     }
 
     companion object {
-        private const val MAX_QUEUE_BYTES = 128_000L
-        private const val MAX_SUBTITLE_CHARS = 135
-        private const val CONTINUOUS_SPEECH_FLUSH_FRAMES = 25 // ~2,5 detik bicara nonstop
-        private val SILENT_300MS_PCM = ByteArray(16_000 * 2 * 300 / 1000)
+        private const val MAX_QUEUE_BYTES = 96_000L
+        private const val MAX_SUBTITLE_CHARS = 120
+
+        // Basis frame = 50ms
+        private const val FIRST_SPEECH_FLUSH_FRAMES = 20 // 1,0 detik untuk subtitle pertama
+        private const val STEADY_SPEECH_FLUSH_FRAMES = 28 // 1,4 detik untuk ucapan nonstop
+        private const val MIN_PAUSE_FLUSH_FRAMES = 10 // 0,5 detik bicara + jeda 200ms -> langsung flush
+        private const val PAUSE_SILENCE_FRAMES = 4 // 200ms jeda bicara
+        private const val MAX_RING_FRAMES = 24 // simpan maks 1,2 detik audio paling segar (0 drift)
+        private const val MIN_IMMEDIATE_DRAIN_FRAMES = 16 // >= 0,8 detik audio segar -> langsung proses
+        private const val TURN_LOCK_TIMEOUT_MS = 3200L
+
+        private val SILENT_250MS_PCM = ByteArray(16_000 * 2 * 250 / 1000)
         private val FALLBACK_LIVE_MODELS = listOf(
             "gemini-2.5-flash-native-audio-preview-12-2025",
             "gemini-live-2.5-flash-preview",

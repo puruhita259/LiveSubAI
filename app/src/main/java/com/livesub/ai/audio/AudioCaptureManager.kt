@@ -45,14 +45,12 @@ class AudioCaptureManager(private val context: Context) {
     }
 
     /**
-     * Streaming frame PCM mentah 100ms (16kHz, 16-bit, mono) untuk Gemini Live WebSocket.
-     * Hanya menandai DRM jika perangkat benar-benar memutar media (isMusicActive)
-     * namun buffer PCM bernilai nol absolut selama >= 6 detik.
+     * Streaming frame PCM mentah 50ms (16kHz, 16-bit, mono = 1600 bytes) untuk Gemini Live WebSocket.
      */
     @SuppressLint("MissingPermission")
     suspend fun streamInternalPcmFrames(
         mediaProjection: MediaProjection,
-        frameDurationMs: Long = 100L,
+        frameDurationMs: Long = 50L,
         onFrameReady: (PcmFrame) -> Unit,
         onAudioActive: () -> Unit,
         onIdleSilence: () -> Unit,
@@ -72,7 +70,7 @@ class AudioCaptureManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     suspend fun streamMicrophonePcmFrames(
-        frameDurationMs: Long = 100L,
+        frameDurationMs: Long = 50L,
         onFrameReady: (PcmFrame) -> Unit,
         onAudioActive: () -> Unit
     ) = withContext(Dispatchers.IO) {
@@ -89,13 +87,13 @@ class AudioCaptureManager(private val context: Context) {
     }
 
     /**
-     * Streaming potongan WAV cerdas (max 2,4 detik + early VAD flush saat pembicara berhenti >= 300ms)
+     * Streaming potongan WAV cepat (max 1,6 detik + early VAD flush >= 700ms saat jeda bicara)
      * untuk mode REST Cepat Paralel.
      */
     @SuppressLint("MissingPermission")
     suspend fun streamInternalAudio(
         mediaProjection: MediaProjection,
-        chunkDurationMs: Long = 2400L,
+        chunkDurationMs: Long = 1600L,
         onChunkReady: (AudioChunk) -> Unit,
         onAudioActive: () -> Unit,
         onIdleSilence: () -> Unit,
@@ -115,7 +113,7 @@ class AudioCaptureManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     suspend fun streamMicrophoneAudio(
-        chunkDurationMs: Long = 2400L,
+        chunkDurationMs: Long = 1600L,
         onChunkReady: (AudioChunk) -> Unit,
         onAudioActive: () -> Unit
     ) = withContext(Dispatchers.IO) {
@@ -153,7 +151,7 @@ class AudioCaptureManager(private val context: Context) {
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(SAMPLE_RATE)
+        ).coerceAtLeast(SAMPLE_RATE / 2)
 
         return AudioRecord.Builder()
             .setAudioFormat(audioFormat)
@@ -172,7 +170,7 @@ class AudioCaptureManager(private val context: Context) {
             SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT
-        ).coerceAtLeast(SAMPLE_RATE)
+        ).coerceAtLeast(SAMPLE_RATE / 2)
 
         return AudioRecord(
             MediaRecorder.AudioSource.MIC,
@@ -192,7 +190,8 @@ class AudioCaptureManager(private val context: Context) {
         onIdleSilence: () -> Unit,
         onDrmBlockedDetected: () -> Unit
     ) {
-        val frameBytes = ((SAMPLE_RATE * 2L * frameDurationMs) / 1000L).toInt().coerceAtLeast(1600)
+        val safeFrameMs = frameDurationMs.coerceIn(40L, 200L)
+        val frameBytes = ((SAMPLE_RATE * 2L * safeFrameMs) / 1000L).toInt().coerceAtLeast(1280)
         val readBuffer = ByteArray(frameBytes)
         val accumulator = ByteArrayOutputStream(frameBytes)
 
@@ -201,8 +200,8 @@ class AudioCaptureManager(private val context: Context) {
         var wasBlockedOrIdle = false
         var consecutiveReadErrors = 0
 
-        val drmThresholdFrames = (6000L / frameDurationMs.coerceAtLeast(50L)).toInt()
-        val idleThresholdFrames = (4500L / frameDurationMs.coerceAtLeast(50L)).toInt()
+        val drmThresholdFrames = (6000L / safeFrameMs).toInt()
+        val idleThresholdFrames = (4000L / safeFrameMs).toInt()
 
         try {
             recorder.startRecording()
@@ -213,11 +212,11 @@ class AudioCaptureManager(private val context: Context) {
                     if (consecutiveReadErrors >= 5) {
                         throw IllegalStateException("Stream audio terputus oleh sistem (kode $readCount).")
                     }
-                    delay(120L)
+                    delay(100L)
                     continue
                 }
                 if (readCount == 0) {
-                    delay(20L)
+                    delay(15L)
                     continue
                 }
                 consecutiveReadErrors = 0
@@ -272,9 +271,9 @@ class AudioCaptureManager(private val context: Context) {
         onIdleSilence: () -> Unit,
         onDrmBlockedDetected: () -> Unit
     ) {
-        val frameBytes = ((SAMPLE_RATE * 2L * 100L) / 1000L).toInt() // 100ms
+        val frameBytes = ((SAMPLE_RATE * 2L * 80L) / 1000L).toInt() // 80ms
         val maxChunkBytes = ((SAMPLE_RATE * 2L * maxChunkDurationMs) / 1000L).toInt()
-        val minEarlyFlushBytes = ((SAMPLE_RATE * 2L * 1000L) / 1000L).toInt()
+        val minEarlyFlushBytes = ((SAMPLE_RATE * 2L * 700L) / 1000L).toInt()
         val readBuffer = ByteArray(frameBytes)
         val pcmAccumulator = ByteArrayOutputStream(maxChunkBytes)
 
@@ -294,11 +293,11 @@ class AudioCaptureManager(private val context: Context) {
                     if (consecutiveReadErrors >= 5) {
                         throw IllegalStateException("Stream audio terputus oleh sistem (kode $readCount).")
                     }
-                    delay(120L)
+                    delay(100L)
                     continue
                 }
                 if (readCount == 0) {
-                    delay(20L)
+                    delay(15L)
                     continue
                 }
                 consecutiveReadErrors = 0
@@ -323,14 +322,14 @@ class AudioCaptureManager(private val context: Context) {
                         if (mediaPlaying && frameRms < DIGITAL_ZERO_RMS) {
                             consecutiveDrmZeroFrames++
                             consecutiveIdleFrames = 0
-                            if (consecutiveDrmZeroFrames == 60) {
+                            if (consecutiveDrmZeroFrames == 75) {
                                 wasBlockedOrIdle = true
                                 onDrmBlockedDetected()
                             }
                         } else {
                             consecutiveDrmZeroFrames = 0
                             consecutiveIdleFrames++
-                            if (consecutiveIdleFrames == 45 && !wasBlockedOrIdle) {
+                            if (consecutiveIdleFrames == 50 && !wasBlockedOrIdle) {
                                 wasBlockedOrIdle = true
                                 onIdleSilence()
                             }
