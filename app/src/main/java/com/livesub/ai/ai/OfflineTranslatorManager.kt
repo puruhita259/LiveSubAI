@@ -61,6 +61,7 @@ class OfflineTranslatorManager {
                 modelManager.download(model, conditions).awaitTask()
                 downloadedCache.add(mlCode)
             }
+            Unit
         }
     }
 
