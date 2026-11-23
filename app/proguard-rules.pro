@@ -1,3 +1,6 @@
 -keep class com.livesub.ai.** { *; }
+-keep class org.vosk.** { *; }
+-keep class com.sun.jna.** { *; }
 -dontwarn okhttp3.**
 -dontwarn okio.**
+-dontwarn com.sun.jna.**

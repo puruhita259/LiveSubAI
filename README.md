@@ -1,16 +1,20 @@
-# LiveSub AI v1.1 — Gemini Live API WebSocket (< 1 Detik)
+# LiveSub AI v2.0 — Arsitektur 2 Mode (Hybrid Groq/Cloudflare + Full Offline)
 
-Aplikasi penerjemah subtitle video real-time lintas aplikasi Android dengan **Gemini Live API WebSocket** (`BidiGenerateContent`), efek **Solid Gelap / Glass Hitam / Glass Bening**, dan ikon **Themed Adaptive (Material You)**.
+Penerjemah subtitle video real-time lintas aplikasi Android dengan pemisahan total 3 tahap (**Perekam Audio → STT → Translate Offline ML Kit < 50 ms**).
 
-## Pembaruan v1.1 (Ultra-Rendah Latensi)
+## 2 Mode Pilihan
 
-- **Gemini Live API WebSocket (`GeminiLiveWebSocketClient.kt`):** Streaming frame PCM 16kHz per **100 ms** secara real-time tanpa menunggu potongan 3 detik.
-- **Auto-Discovery Model Live (`auto`):** Otomatis memindai model `bidiGenerateContent` aktif di API Key Anda dan otomatis menegosiasikan modality `TEXT` atau `AUDIO + outputAudioTranscription`.
-- **Auto-Fallback ke REST Cepat Paralel:** Jika server Live penuh atau belum aktif di akun, otomatis pindah ke pipeline REST paralel (`Channel` non-blocking, chunk 1,8 detik + early VAD flush, `thinkingBudget: 0`, dan auto-fallback `gemini-flash-lite-latest` → `gemini-flash-latest`).
+1. **Mode Hybrid (Cloud STT + Translate Offline < 50 ms):**
+   - Mendukung **Groq Console** (`whisper-large-v3-turbo`) dan **Cloudflare Workers AI** (`@cf/openai/whisper-large-v3-turbo`).
+   - Jika kedua kredensial diisi, otomatis saling *failover* saat terkena limit.
+   - Menggunakan potongan audio tumpang-tindih (1,55 detik + 350 ms overlap) pada 2 worker paralel agar ucapan cepat tidak terpotong.
+   - Hasil transkrip langsung diterjemahkan di HP lewat **Google ML Kit Translate** dalam 15–50 ms.
 
-## Cara Build APK di GitHub
+2. **Mode Full Offline (Vosk Streaming STT + Translate Offline < 50 ms):**
+   - Streaming frame PCM 50 ms secara langsung ke model **Vosk** lokal — teks keluar kata per kata (~0,4 detik), 0% internet setelah diunduh.
+   - Tersedia **16 bahasa model suara STT** + **20 bahasa kamus terjemahan ML Kit** yang dapat diunduh & dihapus langsung dari tab **Paket Offline**.
 
-1. Ekstrak ZIP ini, lalu timpa isi repository GitHub Anda dengan isi folder `LiveSubAI/`.
-2. Push ke branch `main` (atau unggah lewat web GitHub).
-3. Buka tab **Actions** → tunggu **Build LiveSub AI APK** selesai → unduh **LiveSubAI-debug-apk** di bagian **Artifacts**.
-4. Instal `app-debug.apk` di HP, masukkan **Gemini API Key** di tab **Tampilan & AI** (biarkan Model Live WebSocket di `auto`), lalu klik **Aktifkan overlay live**.
+## Build APK di GitHub
+
+1. Ekstrak ZIP ini lalu unggah seluruh isi folder `LiveSubAI/` ke branch `main` repository GitHub Anda (hapus file Gemini lama jika ada di folder `ai/`).
+2. Buka tab **Actions** → tunggu **Build LiveSub AI APK** selesai → unduh artifact **LiveSubAI-debug-apk**.

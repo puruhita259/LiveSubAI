@@ -17,11 +17,11 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.livesub.ai.R
+import com.livesub.ai.model.LanguageCatalog
 import com.livesub.ai.model.LiveSubRuntimeState
 import com.livesub.ai.model.OverlayConfig
 import com.livesub.ai.model.ServiceStatus
 import com.livesub.ai.model.SurfaceStyle
-import com.livesub.ai.model.TranslationEngine
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -38,6 +38,7 @@ class OverlayViewController(
     private var rootContainer: LinearLayout? = null
     private var subtitleCard: LinearLayout? = null
     private var statusLabel: TextView? = null
+    private var originalTranscriptText: TextView? = null
     private var subtitleText: ReadableSubtitleTextView? = null
     private var fallbackMicButton: TextView? = null
     private var menuIconButton: ImageView? = null
@@ -107,7 +108,6 @@ class OverlayViewController(
             }
         }
 
-        // 2 ikon kompak di pojok kanan atas kotak subtitle: Menu (toggle kontrol) & X (tutup)
         val menuBtn = createCornerIconButton(
             drawableRes = R.drawable.ic_overlay_menu,
             description = "Menu kontrol",
@@ -130,6 +130,22 @@ class OverlayViewController(
         topBar.addView(statusTv)
         topBar.addView(menuBtn)
         topBar.addView(closeBtn)
+
+        val origTv = TextView(context).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTextColor(Color.argb(205, 226, 232, 240))
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            visibility = View.GONE
+            setShadowLayer(dp(3).toFloat(), 0f, dp(1).toFloat(), Color.argb(230, 0, 0, 0))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(3)
+                marginEnd = dp(4)
+            }
+        }
 
         val subTv = ReadableSubtitleTextView(context).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, config.fontSizeSp)
@@ -157,10 +173,10 @@ class OverlayViewController(
         }
 
         card.addView(topBar)
+        card.addView(origTv)
         card.addView(subTv)
         card.addView(micBtn)
 
-        // Panel kontrol tersembunyi secara default, muncul saat ikon Menu di pojok diketuk
         val pillRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -224,6 +240,7 @@ class OverlayViewController(
         rootContainer = root
         subtitleCard = card
         statusLabel = statusTv
+        originalTranscriptText = origTv
         subtitleText = subTv
         fallbackMicButton = micBtn
         menuIconButton = menuBtn
@@ -241,12 +258,20 @@ class OverlayViewController(
         val card = subtitleCard ?: return
         val params = layoutParams ?: return
 
-        val engineTag = if (runtime.activeEngine == TranslationEngine.LIVE_WEBSOCKET) "WS" else "REST"
+        val targetShort = LanguageCatalog.findLanguageByCode(config.targetLangCode).shortCode
+        val latencyBadge = if (runtime.translateLatencyMs > 0L) " · ${runtime.translateLatencyMs}ms" else ""
         statusLabel?.text = when (runtime.status) {
             ServiceStatus.DRM_BLOCKED -> "Audio dilindungi DRM"
             ServiceStatus.PAUSED -> "Terjemahan dijeda"
             ServiceStatus.OFFLINE -> "Koneksi terputus"
-            else -> "${runtime.status.label} [$engineTag · ${shortLang(config.targetLanguage)}]"
+            else -> "${runtime.status.label} [${runtime.activeProviderTag} → $targetShort$latencyBadge]"
+        }
+
+        if (config.showOriginalText && runtime.lastSourceTranscript.isNotBlank()) {
+            originalTranscriptText?.text = runtime.lastSourceTranscript
+            originalTranscriptText?.visibility = View.VISIBLE
+        } else {
+            originalTranscriptText?.visibility = View.GONE
         }
 
         subtitleText?.apply {
@@ -282,6 +307,7 @@ class OverlayViewController(
         rootContainer = null
         subtitleCard = null
         statusLabel = null
+        originalTranscriptText = null
         subtitleText = null
         fallbackMicButton = null
         menuIconButton = null
@@ -441,19 +467,6 @@ class OverlayViewController(
                 cornerRadius = dp(99).toFloat()
                 setColor(bgColor)
             }
-        }
-    }
-
-    private fun shortLang(language: String): String {
-        return when {
-            language.contains("Indonesia", ignoreCase = true) -> "ID"
-            language.contains("Inggris", ignoreCase = true) -> "EN"
-            language.contains("Jepang", ignoreCase = true) -> "JA"
-            language.contains("Korea", ignoreCase = true) -> "KO"
-            language.contains("Arab", ignoreCase = true) -> "AR"
-            language.contains("Mandarin", ignoreCase = true) -> "ZH"
-            language.contains("Thailand", ignoreCase = true) -> "TH"
-            else -> language.take(2).uppercase()
         }
     }
 

@@ -19,20 +19,23 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BlurOn
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.DownloadForOffline
 import androidx.compose.material.icons.rounded.FormatSize
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Layers
-import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material.icons.rounded.Subtitles
 import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Warning
@@ -40,6 +43,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -47,6 +51,8 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -58,13 +64,17 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -75,6 +85,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -82,33 +93,25 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.livesub.ai.ai.OfflineSttManager
+import com.livesub.ai.ai.OfflineTranslatorManager
 import com.livesub.ai.data.LiveSubStateHolder
+import com.livesub.ai.model.EngineMode
+import com.livesub.ai.model.HybridSttProvider
+import com.livesub.ai.model.LanguageCatalog
+import com.livesub.ai.model.LanguageOption
 import com.livesub.ai.model.LiveSubRuntimeState
 import com.livesub.ai.model.OverlayConfig
 import com.livesub.ai.model.SurfaceStyle
 import com.livesub.ai.model.TextProtection
-import com.livesub.ai.model.TranslationEngine
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 private enum class AppTab(val label: String, val icon: ImageVector) {
     HOME("Beranda", Icons.Rounded.Translate),
-    SHARE_PLAYER("Pemutar Link", Icons.Rounded.Subtitles),
-    APPEARANCE("Tampilan & AI", Icons.Rounded.Tune)
+    OFFLINE_PACKS("Paket Offline", Icons.Rounded.DownloadForOffline),
+    APPEARANCE("Tampilan & API", Icons.Rounded.Tune)
 }
-
-private val SUPPORTED_LANGUAGES = listOf(
-    "Bahasa Indonesia",
-    "Bahasa Inggris",
-    "Bahasa Jepang",
-    "Bahasa Korea",
-    "Bahasa Mandarin",
-    "Bahasa Arab",
-    "Bahasa Thailand",
-    "Bahasa Hindi",
-    "Bahasa Spanyol",
-    "Bahasa Prancis",
-    "Bahasa Jerman"
-)
 
 private val FONT_PRESETS = listOf(
     "Kecil" to 12f,
@@ -132,7 +135,6 @@ fun LiveSubApp(
 ) {
     val config by LiveSubStateHolder.config.collectAsStateWithLifecycle()
     val runtime by LiveSubStateHolder.runtime.collectAsStateWithLifecycle()
-    val sharedUrl by LiveSubStateHolder.sharedVideoUrl.collectAsStateWithLifecycle()
 
     var selectedTabIndex by rememberSaveable { mutableIntStateOf(0) }
     val selectedTab = AppTab.entries[selectedTabIndex]
@@ -152,12 +154,14 @@ fun LiveSubApp(
                             )
                             Text(
                                 text = if (runtime.isOverlayActive) {
-                                    "Overlay aktif · ${runtime.activeEngine.label}"
+                                    "Overlay aktif · ${runtime.activeProviderTag}"
                                 } else {
-                                    "Mode: ${config.translationEngine.label}"
+                                    config.engineMode.label
                                 },
                                 style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
@@ -210,14 +214,17 @@ fun LiveSubApp(
                             onStartMicMode = onStartMicMode,
                             onStartDemoOverlay = onStartDemoOverlay,
                             onStopOverlay = onStopOverlay,
+                            onGoToOfflinePacks = { selectedTabIndex = 1 },
+                            onGoToApiSetup = { selectedTabIndex = 2 },
                             onConfigChange = onSaveConfig
                         )
-                        AppTab.SHARE_PLAYER -> SharePlayerScreen(
-                            sharedUrl = sharedUrl,
-                            targetLanguage = config.targetLanguage,
-                            onLaunchOverlayForLink = onStartLiveCapture
+                        AppTab.OFFLINE_PACKS -> OfflinePacksScreen(
+                            config = config,
+                            onSelectOfflineSttModel = { modelId ->
+                                onSaveConfig(config.copy(offlineSttModelId = modelId))
+                            }
                         )
-                        AppTab.APPEARANCE -> AppearanceAndAiScreen(
+                        AppTab.APPEARANCE -> AppearanceAndApiScreen(
                             config = config,
                             onSaveConfig = onSaveConfig
                         )
@@ -240,8 +247,16 @@ private fun HomeScreen(
     onStartMicMode: () -> Unit,
     onStartDemoOverlay: () -> Unit,
     onStopOverlay: () -> Unit,
+    onGoToOfflinePacks: () -> Unit,
+    onGoToApiSetup: () -> Unit,
     onConfigChange: (OverlayConfig) -> Unit
 ) {
+    val context = LocalContext.current
+    val sttManager = remember { OfflineSttManager(context) }
+    val downloadedSttIds = remember(config.offlineSttModelId) { sttManager.getDownloadedModelIds() }
+    val hasHybridKey = config.groqApiKey.isNotBlank() ||
+        (config.cloudflareAccountId.isNotBlank() && config.cloudflareApiToken.isNotBlank())
+
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -271,10 +286,9 @@ private fun HomeScreen(
                     Spacer(Modifier.height(6.dp))
                     Text(
                         text = if (runtime.isOverlayActive) {
-                            val modelSuffix = if (runtime.activeModelName.isNotBlank()) " (${runtime.activeModelName})" else ""
-                            "Status: ${runtime.status.label}$modelSuffix. Buka YouTube, TikTok, Reels, atau browser."
+                            "Mesin aktif: ${runtime.activeProviderTag}. Translate lokal ML Kit ~20–50 ms."
                         } else {
-                            "Streaming audio real-time dengan auto-flush anti-macet dan tombol A-/A+ langsung di overlay."
+                            "Sistem rekam audio, transkripsi (STT), dan terjemahan offline (< 50 ms) berjalan terpisah agar real-time."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -329,6 +343,85 @@ private fun HomeScreen(
             }
         }
 
+        // Pilih 2 Mesin Utama: Hybrid vs Full Offline
+        item {
+            OutlinedCard(shape = RoundedCornerShape(16.dp)) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Pilih model penerjemah (2 mode)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+
+                    EngineMode.entries.forEach { mode ->
+                        SelectableOptionRow(
+                            title = mode.label,
+                            subtitle = mode.subtitle,
+                            selected = config.engineMode == mode,
+                            onClick = { onConfigChange(config.copy(engineMode = mode)) }
+                        )
+                    }
+
+                    if (config.engineMode == EngineMode.HYBRID_CLOUD_STT) {
+                        HorizontalDivider()
+                        Text(
+                            text = "Provider STT Hybrid",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            HybridSttProvider.entries.forEach { provider ->
+                                FilterChip(
+                                    selected = config.hybridProvider == provider,
+                                    onClick = { onConfigChange(config.copy(hybridProvider = provider)) },
+                                    label = { Text(provider.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                        if (!hasHybridKey) {
+                            FilledTonalButton(
+                                onClick = onGoToApiSetup,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Rounded.Key, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("Isi API Key Groq / Cloudflare")
+                            }
+                        }
+                    } else {
+                        HorizontalDivider()
+                        val selectedStt = LanguageCatalog.findOfflineSttById(config.offlineSttModelId)
+                        val isReady = downloadedSttIds.contains(selectedStt.id)
+                        Text(
+                            text = if (isReady) {
+                                "Model suara offline siap: ${selectedStt.displayName} (${selectedStt.sizeLabel})"
+                            } else {
+                                "Model suara '${selectedStt.displayName}' belum diunduh."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isReady) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                        )
+                        FilledTonalButton(
+                            onClick = onGoToOfflinePacks,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Rounded.DownloadForOffline, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Kelola & unduh bahasa offline")
+                        }
+                    }
+                }
+            }
+        }
+
         if (!hasOverlayPermission || !hasAudioPermission) {
             item {
                 OutlinedCard(shape = RoundedCornerShape(16.dp)) {
@@ -365,6 +458,7 @@ private fun HomeScreen(
             }
         }
 
+        // Pengaturan Bahasa
         item {
             OutlinedCard(shape = RoundedCornerShape(16.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -373,17 +467,28 @@ private fun HomeScreen(
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold
                     )
-                    LanguageSelectorField(
-                        label = "Bahasa sumber",
-                        selected = config.sourceLanguage,
-                        options = listOf("Deteksi otomatis") + SUPPORTED_LANGUAGES,
-                        onSelected = { onConfigChange(config.copy(sourceLanguage = it)) }
-                    )
-                    LanguageSelectorField(
-                        label = "Terjemahkan ke",
-                        selected = config.targetLanguage,
-                        options = SUPPORTED_LANGUAGES,
-                        onSelected = { onConfigChange(config.copy(targetLanguage = it)) }
+
+                    if (config.engineMode == EngineMode.HYBRID_CLOUD_STT) {
+                        LanguageCodeDropdown(
+                            label = "Bahasa suara video (Hybrid STT)",
+                            selected = LanguageCatalog.findLanguageByCode(config.sourceLangCode),
+                            options = listOf(LanguageCatalog.AUTO_DETECT) + LanguageCatalog.TRANSLATE_LANGUAGES,
+                            onSelected = { onConfigChange(config.copy(sourceLangCode = it.code)) }
+                        )
+                    } else {
+                        OfflineSttDropdown(
+                            label = "Model suara video (Full Offline)",
+                            selectedId = config.offlineSttModelId,
+                            downloadedIds = downloadedSttIds,
+                            onSelected = { onConfigChange(config.copy(offlineSttModelId = it)) }
+                        )
+                    }
+
+                    LanguageCodeDropdown(
+                        label = "Terjemahkan ke (ML Kit Offline < 50 ms)",
+                        selected = LanguageCatalog.findLanguageByCode(config.targetLangCode),
+                        options = LanguageCatalog.TRANSLATE_LANGUAGES,
+                        onSelected = { onConfigChange(config.copy(targetLangCode = it.code)) }
                     )
                 }
             }
@@ -432,71 +537,244 @@ private fun HomeScreen(
 }
 
 @Composable
-private fun SharePlayerScreen(
-    sharedUrl: String?,
-    targetLanguage: String,
-    onLaunchOverlayForLink: () -> Unit
+private fun OfflinePacksScreen(
+    config: OverlayConfig,
+    onSelectOfflineSttModel: (String) -> Unit
 ) {
-    var manualUrl by remember(sharedUrl) { mutableStateOf(sharedUrl.orEmpty()) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val sttManager = remember { OfflineSttManager(context) }
+    val translatorManager = remember { OfflineTranslatorManager() }
+
+    var activeSection by rememberSaveable { mutableIntStateOf(0) } // 0 = STT Suara (16), 1 = Kamus Translate (20)
+    var downloadedStt by remember { mutableStateOf(sttManager.getDownloadedModelIds()) }
+    var downloadedTranslate by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var statusBanner by remember { mutableStateOf<String?>(null) }
+
+    val sttProgress = remember { mutableStateMapOf<String, Float>() }
+    val translateDownloading = remember { mutableStateMapOf<String, Boolean>() }
+
+    LaunchedEffect(Unit) {
+        try {
+            downloadedTranslate = translatorManager.getDownloadedLanguageCodes()
+        } catch (_: Exception) {
+        }
+    }
 
     LazyColumn(
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize()
     ) {
         item {
-            OutlinedCard(shape = RoundedCornerShape(18.dp)) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Link, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "Terima tautan video (Share-to-LiveSub)",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "Bagikan tautan dari YouTube, TikTok, atau Reels ke LiveSub AI, atau tempel tautannya di bawah untuk menyiapkan terjemahan ke $targetLanguage.",
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "Unduh paket bahasa untuk kerja offline & cepat",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "• Model Suara (STT): dipakai Mode Full Offline (streaming kata per kata di HP).\n• Kamus Terjemahan (ML Kit ~30 MB): dipakai Mode Hybrid & Full Offline untuk terjemahan < 50 ms.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedTextField(
-                        value = manualUrl,
-                        onValueChange = { manualUrl = it },
-                        label = { Text("Tautan video") },
-                        placeholder = { Text("https://youtu.be/...") },
-                        singleLine = true,
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
-                    )
-                    Button(
-                        onClick = onLaunchOverlayForLink,
-                        modifier = Modifier.fillMaxWidth().height(48.dp)
                     ) {
-                        Icon(Icons.Rounded.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Siapkan overlay & putar video")
+                        FilterChip(
+                            selected = activeSection == 0,
+                            onClick = { activeSection = 0 },
+                            label = { Text("Suara STT (${downloadedStt.size}/16)") },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = activeSection == 1,
+                            onClick = { activeSection = 1 },
+                            label = { Text("Kamus (${downloadedTranslate.size}/20)") },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    if (!statusBanner.isNullOrBlank()) {
+                        Text(
+                            text = statusBanner!!,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
             }
         }
 
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        text = "Catatan kompatibilitas aplikasi video",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Text(
-                        text = "• YouTube, TikTok, Reels, X, Telegram, dan browser mendukung tangkap audio internal secara langsung.\n• Aplikasi ber-DRM (seperti Netflix/Disney+) otomatis terdeteksi saat media diputar dan menawarkan Mode Mikrofon.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+        if (activeSection == 0) {
+            items(LanguageCatalog.OFFLINE_STT_MODELS, key = { it.id }) { spec ->
+                val isDownloaded = downloadedStt.contains(spec.id)
+                val isSelected = config.offlineSttModelId == spec.id
+                val progress = sttProgress[spec.id]
+
+                OutlinedCard(
+                    shape = RoundedCornerShape(14.dp),
+                    border = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else CardDefaults.outlinedCardBorder()
+                ) {
+                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = spec.displayName,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (isDownloaded) "Terunduh (${spec.sizeLabel}) · Siap Offline" else "Ukuran unduhan: ${spec.sizeLabel}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isDownloaded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            if (progress != null) {
+                                Text(
+                                    text = "${(progress * 100).roundToInt()}%",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            } else if (isDownloaded) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (!isSelected) {
+                                        FilledTonalButton(
+                                            onClick = { onSelectOfflineSttModel(spec.id) },
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                                        ) {
+                                            Text("Pakai")
+                                        }
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Rounded.CheckCircle,
+                                            contentDescription = "Aktif",
+                                            tint = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            sttManager.deleteModel(spec.id)
+                                            downloadedStt = sttManager.getDownloadedModelIds()
+                                            statusBanner = "Model suara ${spec.displayName} dihapus."
+                                        }
+                                    ) {
+                                        Icon(Icons.Rounded.DeleteOutline, contentDescription = "Hapus")
+                                    }
+                                }
+                            } else {
+                                FilledTonalButton(
+                                    onClick = {
+                                        sttProgress[spec.id] = 0.02f
+                                        statusBanner = "Mengunduh model suara ${spec.displayName}..."
+                                        scope.launch {
+                                            val res = sttManager.downloadModel(spec) { p ->
+                                                sttProgress[spec.id] = p
+                                            }
+                                            sttProgress.remove(spec.id)
+                                            downloadedStt = sttManager.getDownloadedModelIds()
+                                            if (res.isSuccess) {
+                                                onSelectOfflineSttModel(spec.id)
+                                                statusBanner = "Model ${spec.displayName} siap dipakai & dipilih otomatis."
+                                            } else {
+                                                statusBanner = "Gagal unduh ${spec.displayName}: ${res.exceptionOrNull()?.localizedMessage}"
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Unduh")
+                                }
+                            }
+                        }
+
+                        if (progress != null) {
+                            LinearProgressIndicator(
+                                progress = { progress.coerceIn(0f, 1f) },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            items(LanguageCatalog.TRANSLATE_LANGUAGES, key = { it.code }) { lang ->
+                val isDownloaded = downloadedTranslate.contains(lang.code)
+                val isLoading = translateDownloading[lang.code] == true
+
+                OutlinedCard(shape = RoundedCornerShape(14.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(14.dp)
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "${lang.displayName} (${lang.shortCode})",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (isDownloaded) "Kamus offline siap (< 50 ms)" else "Belum diunduh (~30 MB)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (isDownloaded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        if (isLoading) {
+                            CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                        } else if (isDownloaded) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Rounded.CloudDone,
+                                    contentDescription = "Terunduh",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                IconButton(
+                                    onClick = {
+                                        translateDownloading[lang.code] = true
+                                        scope.launch {
+                                            translatorManager.deleteLanguagePack(lang.code)
+                                            downloadedTranslate = translatorManager.getDownloadedLanguageCodes()
+                                            translateDownloading.remove(lang.code)
+                                            statusBanner = "Kamus ${lang.displayName} dihapus."
+                                        }
+                                    }
+                                ) {
+                                    Icon(Icons.Rounded.DeleteOutline, contentDescription = "Hapus")
+                                }
+                            }
+                        } else {
+                            FilledTonalButton(
+                                onClick = {
+                                    translateDownloading[lang.code] = true
+                                    statusBanner = "Mengunduh kamus ${lang.displayName}..."
+                                    scope.launch {
+                                        val res = translatorManager.downloadLanguagePack(lang.code)
+                                        downloadedTranslate = translatorManager.getDownloadedLanguageCodes()
+                                        translateDownloading.remove(lang.code)
+                                        statusBanner = if (res.isSuccess) {
+                                            "Kamus ${lang.displayName} siap offline."
+                                        } else {
+                                            "Gagal unduh kamus ${lang.displayName}: ${res.exceptionOrNull()?.localizedMessage}"
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Unduh")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -504,13 +782,15 @@ private fun SharePlayerScreen(
 }
 
 @Composable
-private fun AppearanceAndAiScreen(
+private fun AppearanceAndApiScreen(
     config: OverlayConfig,
     onSaveConfig: (OverlayConfig) -> Unit
 ) {
-    var apiKeyInput by remember(config.geminiApiKey) { mutableStateOf(config.geminiApiKey) }
-    var liveModelInput by remember(config.liveModel) { mutableStateOf(config.liveModel) }
-    var restModelInput by remember(config.geminiModel) { mutableStateOf(config.geminiModel) }
+    var groqKeyInput by remember(config.groqApiKey) { mutableStateOf(config.groqApiKey) }
+    var groqModelInput by remember(config.groqModel) { mutableStateOf(config.groqModel) }
+    var cfAccountInput by remember(config.cloudflareAccountId) { mutableStateOf(config.cloudflareAccountId) }
+    var cfTokenInput by remember(config.cloudflareApiToken) { mutableStateOf(config.cloudflareApiToken) }
+    var cfModelInput by remember(config.cloudflareModel) { mutableStateOf(config.cloudflareModel) }
     var previewLightBg by remember { mutableStateOf(false) }
 
     LazyColumn(
@@ -518,6 +798,89 @@ private fun AppearanceAndAiScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         modifier = Modifier.fillMaxSize()
     ) {
+        // Konfigurasi API Key Hybrid (Groq Console & Cloudflare Workers AI)
+        item {
+            OutlinedCard(shape = RoundedCornerShape(18.dp)) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Key, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "API Key STT Hybrid (Groq & Cloudflare)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Text(
+                        text = "Isi salah satu atau keduanya (otomatis saling backup saat limit). Semua kunci disimpan lokal di HP saja.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Text("1. Groq Console (console.groq.com)", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        value = groqKeyInput,
+                        onValueChange = { groqKeyInput = it },
+                        label = { Text("Groq API Key (gsk_...)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = groqModelInput,
+                        onValueChange = { groqModelInput = it },
+                        label = { Text("Model Whisper Groq") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    HorizontalDivider()
+
+                    Text("2. Cloudflare Workers AI", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    OutlinedTextField(
+                        value = cfAccountInput,
+                        onValueChange = { cfAccountInput = it },
+                        label = { Text("Cloudflare Account ID") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = cfTokenInput,
+                        onValueChange = { cfTokenInput = it },
+                        label = { Text("Cloudflare API Token (Workers AI)") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = cfModelInput,
+                        onValueChange = { cfModelInput = it },
+                        label = { Text("Model Whisper Cloudflare") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Button(
+                        onClick = {
+                            onSaveConfig(
+                                config.copy(
+                                    groqApiKey = groqKeyInput.trim(),
+                                    groqModel = groqModelInput.trim().ifEmpty { "whisper-large-v3-turbo" },
+                                    cloudflareAccountId = cfAccountInput.trim(),
+                                    cloudflareApiToken = cfTokenInput.trim(),
+                                    cloudflareModel = cfModelInput.trim().ifEmpty { "@cf/openai/whisper-large-v3-turbo" }
+                                )
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth().height(46.dp)
+                    ) {
+                        Text("Simpan kredensial STT")
+                    }
+                }
+            }
+        }
+
+        // Pratinjau keterbacaan overlay
         item {
             OutlinedCard(shape = RoundedCornerShape(18.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -560,7 +923,7 @@ private fun AppearanceAndAiScreen(
                         contentAlignment = Alignment.Center,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(150.dp)
+                            .height(155.dp)
                             .clip(RoundedCornerShape(14.dp))
                             .background(backdropBrush)
                             .padding(14.dp)
@@ -574,14 +937,21 @@ private fun AppearanceAndAiScreen(
                                 .padding(horizontal = 14.dp, vertical = 12.dp)
                         ) {
                             Text(
-                                text = "Live · Mendengarkan... [WS · ID]",
+                                text = "Mendengarkan... [${config.hybridProvider.shortTag} → ID · 24ms]",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = Color(0xFF93C5FD),
-                                style = TextStyle(
-                                    shadow = Shadow(Color.Black, Offset(0f, 2f), 6f)
-                                )
+                                style = TextStyle(shadow = Shadow(Color.Black, Offset(0f, 2f), 6f))
                             )
+                            if (config.showOriginalText) {
+                                Text(
+                                    text = "First, simmer the broth gently to bring out the aroma.",
+                                    fontSize = 11.sp,
+                                    color = Color(0xFFE2E8F0),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                             Spacer(Modifier.height(4.dp))
                             val textModifier = if (config.textProtection == TextProtection.MICRO_SCRIM) {
                                 Modifier
@@ -592,7 +962,7 @@ private fun AppearanceAndAiScreen(
                                 Modifier
                             }
                             Text(
-                                text = "Pertama, panaskan kaldu dengan api kecil agar aromanya keluar perlahan.",
+                                text = "Pertama, panaskan kaldu perlahan agar aromanya keluar.",
                                 fontSize = config.fontSizeSp.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = Color.White,
@@ -612,6 +982,7 @@ private fun AppearanceAndAiScreen(
             }
         }
 
+        // Pengaturan Tampilan Kotak Subtitle
         item {
             OutlinedCard(shape = RoundedCornerShape(18.dp)) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -622,12 +993,27 @@ private fun AppearanceAndAiScreen(
 
                     HorizontalDivider()
 
-                    Text(
-                        text = "Permukaan kotak & pelindung teks",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Tampilkan teks asli (2 bahasa)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = "Tampilkan transkrip bahasa asli tipis di atas hasil terjemahan.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = config.showOriginalText,
+                            onCheckedChange = { onSaveConfig(config.copy(showOriginalText = it)) }
+                        )
+                    }
 
+                    HorizontalDivider()
+
+                    Text("Permukaan kotak subtitle", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                     SurfaceStyle.entries.forEach { style ->
                         SelectableOptionRow(
                             title = style.label,
@@ -639,11 +1025,7 @@ private fun AppearanceAndAiScreen(
 
                     HorizontalDivider()
 
-                    Text(
-                        text = "Pelindung keterbacaan huruf",
-                        style = MaterialTheme.typography.labelLarge,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    Text("Pelindung keterbacaan huruf", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                     TextProtection.entries.forEach { protection ->
                         SelectableOptionRow(
                             title = protection.label,
@@ -668,80 +1050,6 @@ private fun AppearanceAndAiScreen(
                         onValueChange = { onSaveConfig(config.copy(tintOpacity = it)) },
                         valueRange = 0.15f..0.95f
                     )
-                }
-            }
-        }
-
-        item {
-            OutlinedCard(shape = RoundedCornerShape(18.dp)) {
-                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = "Mesin terjemahan & koneksi Gemini AI",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-
-                    TranslationEngine.entries.forEach { engine ->
-                        SelectableOptionRow(
-                            title = engine.label,
-                            subtitle = engine.subtitle,
-                            selected = config.translationEngine == engine,
-                            onClick = { onSaveConfig(config.copy(translationEngine = engine)) }
-                        )
-                    }
-
-                    HorizontalDivider()
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Rounded.Key, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "API Key disimpan lokal di HP saja (tidak pernah masuk GitHub).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-
-                    OutlinedTextField(
-                        value = apiKeyInput,
-                        onValueChange = { apiKeyInput = it },
-                        label = { Text("Gemini API Key") },
-                        visualTransformation = PasswordVisualTransformation(),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = liveModelInput,
-                        onValueChange = { liveModelInput = it },
-                        label = { Text("Model Live WebSocket (auto = deteksi otomatis)") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = restModelInput,
-                        onValueChange = { restModelInput = it },
-                        label = { Text("Model REST Cadangan") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Button(
-                        onClick = {
-                            onSaveConfig(
-                                config.copy(
-                                    geminiApiKey = apiKeyInput.trim(),
-                                    liveModel = liveModelInput.trim().ifEmpty { "auto" },
-                                    geminiModel = restModelInput.trim().ifEmpty { "gemini-flash-lite-latest" }
-                                )
-                            )
-                        },
-                        modifier = Modifier.fillMaxWidth().height(46.dp)
-                    ) {
-                        Text("Simpan pengaturan AI")
-                    }
                 }
             }
         }
@@ -831,11 +1139,11 @@ private fun PermissionRow(
 }
 
 @Composable
-private fun LanguageSelectorField(
+private fun LanguageCodeDropdown(
     label: String,
-    selected: String,
-    options: List<String>,
-    onSelected: (String) -> Unit
+    selected: LanguageOption,
+    options: List<LanguageOption>,
+    onSelected: (LanguageOption) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -854,7 +1162,7 @@ private fun LanguageSelectorField(
                 )
                 Spacer(Modifier.height(2.dp))
                 Text(
-                    text = selected,
+                    text = "${selected.displayName} (${selected.shortCode})",
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Medium
                 )
@@ -867,9 +1175,60 @@ private fun LanguageSelectorField(
         ) {
             options.forEach { option ->
                 DropdownMenuItem(
-                    text = { Text(option) },
+                    text = { Text("${option.displayName} (${option.shortCode})") },
                     onClick = {
                         onSelected(option)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OfflineSttDropdown(
+    label: String,
+    selectedId: String,
+    downloadedIds: Set<String>,
+    onSelected: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = LanguageCatalog.findOfflineSttById(selectedId)
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        OutlinedCard(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = true },
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(2.dp))
+                val badge = if (downloadedIds.contains(selected.id)) "Siap Offline" else "Belum Diunduh"
+                Text(
+                    text = "${selected.displayName} ($badge)",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            LanguageCatalog.OFFLINE_STT_MODELS.forEach { spec ->
+                val status = if (downloadedIds.contains(spec.id)) "✓" else spec.sizeLabel
+                DropdownMenuItem(
+                    text = { Text("${spec.displayName} ($status)") },
+                    onClick = {
+                        onSelected(spec.id)
                         expanded = false
                     }
                 )

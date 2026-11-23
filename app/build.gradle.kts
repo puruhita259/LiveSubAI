@@ -14,8 +14,8 @@ android {
         applicationId = "com.livesub.ai"
         minSdk = 29
         targetSdk = resolvedTargetApi
-        versionCode = 5
-        versionName = "1.3.1"
+        versionCode = 6
+        versionName = "2.0.0"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -50,6 +50,9 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            pickFirsts += listOf("**/libjnidispatch.so", "**/libvosk.so")
+        }
     }
 }
 
@@ -70,6 +73,16 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // On-device translation (< 50 ms) & language detection (Google ML Kit)
+    implementation("com.google.mlkit:translate:17.0.3")
+    implementation("com.google.mlkit:language-id:17.0.6")
+
+    // Full Offline Streaming Speech-to-Text (Vosk Android + JNA AAR)
+    implementation("net.java.dev.jna:jna:5.13.0@aar")
+    implementation("com.alphacephei:vosk-android:0.3.47") {
+        exclude(group = "net.java.dev.jna", module = "jna")
+    }
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

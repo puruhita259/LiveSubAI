@@ -32,7 +32,8 @@ class AudioCaptureManager(private val context: Context) {
         val isSpeech: Boolean
     )
 
-    data class AudioChunk(
+    data class OverlappingChunk(
+        val seqId: Long,
         val wavBytes: ByteArray,
         val rmsLevel: Double
     )
@@ -45,7 +46,7 @@ class AudioCaptureManager(private val context: Context) {
     }
 
     /**
-     * Streaming frame PCM mentah 50ms (16kHz, 16-bit, mono = 1600 bytes) untuk Gemini Live WebSocket.
+     * Streaming frame PCM mentah 50ms (16kHz, 16-bit, mono = 1600 bytes) untuk Mode Full Offline (Vosk).
      */
     @SuppressLint("MissingPermission")
     suspend fun streamInternalPcmFrames(
@@ -87,22 +88,24 @@ class AudioCaptureManager(private val context: Context) {
     }
 
     /**
-     * Streaming potongan WAV cepat (max 1,6 detik + early VAD flush >= 700ms saat jeda bicara)
-     * untuk mode REST Cepat Paralel.
+     * Streaming potongan WAV tumpang-tindih (1,6 dtk + 350 ms overlap dari ekor potongan sebelumnya)
+     * agar kata cepat di batas potongan TIDAK PERNAH terpotong pada Mode Hybrid (Groq / Cloudflare).
      */
     @SuppressLint("MissingPermission")
-    suspend fun streamInternalAudio(
+    suspend fun streamInternalOverlappingChunks(
         mediaProjection: MediaProjection,
         chunkDurationMs: Long = 1600L,
-        onChunkReady: (AudioChunk) -> Unit,
+        overlapMs: Long = 350L,
+        onChunkReady: (OverlappingChunk) -> Unit,
         onAudioActive: () -> Unit,
         onIdleSilence: () -> Unit,
         onDrmBlockedDetected: () -> Unit
     ) = withContext(Dispatchers.IO) {
         val recorder = buildInternalRecorder(mediaProjection)
-        runVadChunkLoop(
+        runOverlappingVadLoop(
             recorder = recorder,
             maxChunkDurationMs = chunkDurationMs,
+            overlapMs = overlapMs,
             detectDrm = true,
             onChunkReady = onChunkReady,
             onAudioActive = onAudioActive,
@@ -112,15 +115,17 @@ class AudioCaptureManager(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    suspend fun streamMicrophoneAudio(
+    suspend fun streamMicrophoneOverlappingChunks(
         chunkDurationMs: Long = 1600L,
-        onChunkReady: (AudioChunk) -> Unit,
+        overlapMs: Long = 350L,
+        onChunkReady: (OverlappingChunk) -> Unit,
         onAudioActive: () -> Unit
     ) = withContext(Dispatchers.IO) {
         val recorder = buildMicRecorder()
-        runVadChunkLoop(
+        runOverlappingVadLoop(
             recorder = recorder,
             maxChunkDurationMs = chunkDurationMs,
+            overlapMs = overlapMs,
             detectDrm = false,
             onChunkReady = onChunkReady,
             onAudioActive = onAudioActive,
@@ -262,20 +267,25 @@ class AudioCaptureManager(private val context: Context) {
         }
     }
 
-    private suspend fun runVadChunkLoop(
+    private suspend fun runOverlappingVadLoop(
         recorder: AudioRecord,
         maxChunkDurationMs: Long,
+        overlapMs: Long,
         detectDrm: Boolean,
-        onChunkReady: (AudioChunk) -> Unit,
+        onChunkReady: (OverlappingChunk) -> Unit,
         onAudioActive: () -> Unit,
         onIdleSilence: () -> Unit,
         onDrmBlockedDetected: () -> Unit
     ) {
-        val frameBytes = ((SAMPLE_RATE * 2L * 80L) / 1000L).toInt() // 80ms
+        val frameBytes = ((SAMPLE_RATE * 2L * 80L) / 1000L).toInt() // 80ms = 2560 bytes
         val maxChunkBytes = ((SAMPLE_RATE * 2L * maxChunkDurationMs) / 1000L).toInt()
-        val minEarlyFlushBytes = ((SAMPLE_RATE * 2L * 700L) / 1000L).toInt()
+        val overlapBytes = ((SAMPLE_RATE * 2L * overlapMs) / 1000L).toInt()
+        val minEarlyFlushBytes = ((SAMPLE_RATE * 2L * 750L) / 1000L).toInt()
+
         val readBuffer = ByteArray(frameBytes)
-        val pcmAccumulator = ByteArrayOutputStream(maxChunkBytes)
+        val pcmAccumulator = ByteArrayOutputStream(maxChunkBytes + overlapBytes)
+        var tailOverlap = ByteArray(0)
+        var seqCounter = 0L
 
         var hadSpeechInChunk = false
         var trailingSilentFrames = 0
@@ -343,14 +353,33 @@ class AudioCaptureManager(private val context: Context) {
                     val earlyPauseFlush = pcmAccumulator.size() >= minEarlyFlushBytes && trailingSilentFrames >= 3
 
                     if (reachedMax || earlyPauseFlush) {
-                        val pcm = pcmAccumulator.toByteArray()
+                        val freshPcm = pcmAccumulator.toByteArray()
                         pcmAccumulator.reset()
                         hadSpeechInChunk = false
                         trailingSilentFrames = 0
-                        val chunkRms = computeRms(pcm)
+
+                        // Gabungkan ekor 350ms dari potongan sebelumnya agar kata di batas tidak terpotong
+                        val combinedPcm = if (tailOverlap.isNotEmpty()) {
+                            ByteArrayOutputStream(tailOverlap.size + freshPcm.size).apply {
+                                write(tailOverlap)
+                                write(freshPcm)
+                            }.toByteArray()
+                        } else {
+                            freshPcm
+                        }
+
+                        // Simpan ekor baru hanya jika masih ada bicara (reachedMax), kosongkan jika jeda alami
+                        tailOverlap = if (reachedMax && freshPcm.size > overlapBytes) {
+                            freshPcm.copyOfRange(freshPcm.size - overlapBytes, freshPcm.size)
+                        } else {
+                            ByteArray(0)
+                        }
+
+                        val chunkRms = computeRms(freshPcm)
                         if (chunkRms >= SPEECH_RMS_THRESHOLD * 0.7) {
-                            val wav = wrapPcmAsWav(pcm, SAMPLE_RATE, 1, 16)
-                            onChunkReady(AudioChunk(wavBytes = wav, rmsLevel = chunkRms))
+                            seqCounter++
+                            val wav = wrapPcmAsWav(combinedPcm, SAMPLE_RATE, 1, 16)
+                            onChunkReady(OverlappingChunk(seqId = seqCounter, wavBytes = wav, rmsLevel = chunkRms))
                         }
                     }
                 }
@@ -415,7 +444,7 @@ class AudioCaptureManager(private val context: Context) {
 
     companion object {
         const val SAMPLE_RATE = 16_000
-        private const val SPEECH_RMS_THRESHOLD = 30.0
+        private const val SPEECH_RMS_THRESHOLD = 28.0
         private const val DIGITAL_ZERO_RMS = 1.5
     }
 }
